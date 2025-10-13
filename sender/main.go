@@ -20,8 +20,6 @@ import (
 	"sync"
 	"time"
 
-	vpx "command-line-arguments/home/amirmo/testbed/video/pion/libvpx-go/vpx/types.go"
-
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
