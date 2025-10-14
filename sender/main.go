@@ -26,8 +26,6 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/ivfreader"
-
-	"github.com/xlab/libvpx-go/vpx"
 )
 
 func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
@@ -44,43 +42,8 @@ func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 	return resp.Body.Close()
 }
 
-func mustOK(where string, err vpx.CodecErr, ctx *vpx.CodecCtx) {
-	if err != 0 {
-		detail := vpx.CodecErrorDetail(ctx)
-		panic(fmt.Sprintf("%s: %s (%s)", where, vpx.CodecErrToString(err), detail))
-	}
-}
-
-func setup_encoder() (*vpx.CodecIface, vpx.CodecEncCfg) {
-	iface := vpx.EncoderIfaceVP8() // VP8 encoder iface. :contentReference[oaicite:1]{index=1}
-	var cfg vpx.CodecEncCfg
-
-	fpsNum := 1000
-	fpsDen := 24000
-	w := 1920
-	h := 1080
-	bitKbps := 1_000_000
-
-	cfg.GW = w                                             // width
-	cfg.GH = h                                             // height
-	cfg.GTimebase = vpx.Rational{Num: fpsDen, Den: fpsNum} // timebase = 1/fps
-	cfg.RcTargetBitrate = bitKbps
-	// Optional: real-time-ish settings
-	// cfg.GUsage = 1            // usage=real-time (if desired)
-	// cfg.KfMode = 1            // e.g., VPX_KF_AUTO (depends on needs)
-	// cfg.KfMinDist, cfg.KfMaxDist = 0, uint32(fpsNum*10) // keyframe interval
-
-	ctx := vpx.NewCodecCtx()
-	mustOK("CodecEncInitVer",
-		vpx.CodecEncInitVer(ctx, iface, &cfg, 0, vpx.DecoderABIVersion), ctx) // ABI/version params are exported in the pkg. :contentReference[oaicite:3]{index=3}
-
-	return iface, ctx
-}
-
 //nolint:gocognit, cyclop
 func main() {
-
-	setup_encoder()
 
 	offerAddr := flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
 	answerAddr := flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")

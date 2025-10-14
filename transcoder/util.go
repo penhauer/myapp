@@ -1,4 +1,4 @@
-package main
+package transcoder
 
 /*
 #include <libavutil/avutil.h>

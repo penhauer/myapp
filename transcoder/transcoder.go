@@ -1,4 +1,4 @@
-package main
+package transcoder
 
 /*
 #include <libavutil/avutil.h>
@@ -369,7 +369,6 @@ func encodeStream(ctx *TranscodingCtx) (bool, error) {
 		frame.CAVFrame.pts = C.long(ecnt)
 		ecnt += 1
 	}
-	println("here", frame, ok)
 
 	err = ctx.encCodec.FeedFrame(frame)
 	if err != nil {
@@ -389,7 +388,6 @@ func encodeStream(ctx *TranscodingCtx) (bool, error) {
 		if ret == int(AVERROR(C.EAGAIN)) {
 			break
 		} else if ret == 0 {
-			println("Successfully got a packet", ecnt, ctx.encPkt.Size())
 			ctx.encPkt.RescaleTime(ctx.encCodec.TimeBase(), ctx.encStream.TimeBase())
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
 			ctx.encPkt.Unref()
@@ -418,7 +416,7 @@ func AVERROR(e int) C.int {
 	return -C.int(e)
 }
 
-func main() {
-	ctx := &TranscodingCtx{dstW: 2560, dstH: 1440}
-	TranscodeY4MToH265(ctx, "input.y4m")
-}
+// func main() {
+// 	ctx := &TranscodingCtx{dstW: 2560, dstH: 1440}
+// 	TranscodeY4MToH265(ctx, "input.y4m")
+// }
