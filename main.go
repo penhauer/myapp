@@ -2,6 +2,7 @@ package main
 
 /*
 #include <libavutil/avutil.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/error.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avstring.h>
@@ -17,13 +18,16 @@ package main
 #include <libavfilter/avfilter.h>
 #include <libavfilter/buffersrc.h>
 #include <libavfilter/buffersink.h>
+#include <libswscale/swscale.h>
 
-#cgo pkg-config: libavcodec libavutil libavformat libavcodec libavfilter
+
+#cgo pkg-config: libavcodec libavutil libavformat libavcodec libavfilter libswscale
 */
 import (
 	"C"
 )
 import (
+	"fmt"
 	"log"
 	"strconv"
 	"unsafe"
@@ -49,9 +53,22 @@ type context struct {
 
 	// transcoding
 	filterGraph *Graph
+
+	//sws
+	swsCtx *C.struct_SwsContext
+	swNV12 *Frame
+
+	// hw
+	hwframeCtx *C.AVBufferRef
+
+	//params
+	srcW int
+	srcH int
+	dstW int
+	dstH int
 }
 
-func openDecoder(ctx *context, inputFileName string) error {
+func setupDecoder(ctx *context, inputFileName string) error {
 	var err error
 	ctx.decFmt, err = NewContextForInput()
 	if err != nil {
@@ -72,13 +89,6 @@ func openDecoder(ctx *context, inputFileName string) error {
 	}
 
 	ctx.decFmt.Dump(0, inputFileName, false)
-
-	for i, stream := range ctx.decFmt.Streams() {
-		println(i, " th stream is ", stream)
-		println(stream.CAVStream.codecpar.codec_id)
-		println(stream.CAVStream.codecpar.codec_type)
-	}
-
 	ctx.decStream = ctx.decFmt.Streams()[0]
 
 	codecID := int(ctx.decStream.CAVStream.codecpar.codec_id)
@@ -96,129 +106,143 @@ func openDecoder(ctx *context, inputFileName string) error {
 		return err
 	}
 
-	if ctx.decPkt, err = NewPacket(); err != nil {
-		log.Fatalf("Failed to create a packet", err)
-		return err
-	}
-
 	if ctx.decFrame, err = NewFrame(); err != nil {
-		log.Fatalf("Failed to create a frame", err)
-		return err
+		log.Fatalf("", err)
+		return fmt.Errorf("failed to create a frame: %w", err)
 	}
 
-	for decodeStream(ctx) {
+	ctx.srcW = int(ctx.decCodec.CAVCodecContext.width)
+	ctx.srcH = int(ctx.decCodec.CAVCodecContext.height)
+
+	ctx.swNV12, _ = NewFrame()
+	ctx.swNV12.CAVFrame.format = C.AV_PIX_FMT_NV12
+	ctx.swNV12.CAVFrame.width = C.int(ctx.srcW)
+	ctx.swNV12.CAVFrame.height = C.int(ctx.srcH)
+
+	if int(C.av_frame_get_buffer(ctx.swNV12.CAVFrame, 0)) < 0 {
+		return fmt.Errorf("failed to allocate buffer for FMT_NV12 frame")
 	}
+
 	return nil
 }
 
-func openEncoder(ctx *context) error {
-	var codec *Codec
+func setupEncoder(ctx *context) error {
 	var err error
 
-	// codecName := "libx264"
-	// codec = FindEncoderByName(codecName)
-
-	codec = NewCodecFromC(unsafe.Pointer(C.avcodec_find_encoder(C.AV_CODEC_ID_VP9)))
-
+	// codecName := "av1_nvenc"
+	codecName := "hevc_nvenc"
+	codec := FindEncoderByName(codecName)
 	if codec == nil {
-		log.Fatal("Could not find codec ")
-		return err
+		log.Fatalf("Could not find encoder %s", codecName)
+		return fmt.Errorf("encoder not found")
 	}
 
-	options := NewDictionary()
-	defer options.Free()
-
+	// --- 2) Build options (NVENC-friendly; drop libvpx ones)
 	params := map[string]string{
-		"bitrate": "1500000",
-		// "width":     "1920",
-		"width": "2560",
-		// "height":    "1080",
+		"bitrate":   "1500000", // ~1.5 Mbps
+		"width":     "2560",
 		"height":    "1440",
 		"framerate": "20",
 		"gop_size":  "120",
-		// "pixel_format": fmt.Sprintf("%d", C.AV_PIX_FMT_YUV420P),
-		// "pixel_format": fmt.Sprintf("%d", video_source.getContext().pix_fmt), // nvenc only
-		// "preset":      "veryfast", // software
-		// "tune":        "zerolatency", // software
-		// "preset":      "p4",  // nvenc
-		// "tune":        "ull", // nvenc
-		// "rc":          "cbr", // nvenc
-		// "zerolatency": "1",   // nvenc
 
-		"quality": "realtime",
-		// "deadline": "rt",
-		"cpu-used":      "6",
-		"row-mt":        "1",
-		"tile-columns":  "3",
-		"tile-rows":     "1",
-		"threads":       "15",
-		"lag-in-frames": "0",
-		// "auto-alt-ref":  "0",
-		// "rc_end_usage":  "cbr",
-		// "b":             "8M",
-		// "maxrate":       "8M",
-		// "minrate":       "8M",
-		// "bufsize": "8M",
-		// "g":       "120",
+		// NVENC options
+		"preset":      "p5",  // p1..p7 (p5 good balance)
+		"tune":        "ull", // ultra-low-latency
+		"rc":          "cbr", // cbr|vbr|constqp
+		"zerolatency": "1",
+		// For 10-bit: use P010 and consider profile=1
+		// "profile":   "1",
 	}
 
-	var pix_fmt PixelFormat = (PixelFormat)(ctx.decCodec.CAVCodecContext.pix_fmt)
-	params["pixel_format"] = pix_fmt.Name()
-
-	println(pix_fmt.Name())
-
-	for key, val := range params {
-		if err := options.Set(key, val); err != nil {
-			log.Fatalf("Failed to set encoder option %s: %v\n", key, err)
-			return err
-		}
-	}
-
+	// --- 3) Create encoder context
 	if ctx.encCodec, err = NewContextWithCodec(codec); err != nil {
-		log.Fatal("Could not initialize encoder context")
-		return err
-	}
-	o := NewOptionAccessor(unsafe.Pointer(ctx.encCodec.CAVCodecContext.priv_data), false)
-
-	for key, val := range params {
-		switch key {
-		case "bitrate":
-			v, _ := strconv.Atoi(val)
-			ctx.encCodec.CAVCodecContext.bit_rate = (C.long)(v)
-		case "width":
-			v, _ := strconv.Atoi(val)
-			ctx.encCodec.CAVCodecContext.width = (C.int)(v)
-		case "height":
-			v, _ := strconv.Atoi(val)
-			ctx.encCodec.CAVCodecContext.height = (C.int)(v)
-		case "pixel_format":
-			ctx.encCodec.CAVCodecContext.pix_fmt = ctx.decCodec.CAVCodecContext.pix_fmt
-		case "framerate":
-			v, _ := strconv.Atoi(val)
-			ctx.encCodec.SetTimeBase(NewRational(1, v))
-			ctx.encCodec.SetFrameRate(NewRational(v, 1))
-		case "gop_size":
-			v, _ := strconv.Atoi(val)
-			ctx.encCodec.CAVCodecContext.gop_size = (C.int)(v)
-		default:
-			if err = o.SetOption(key, val); err != nil {
-				println("cannot set option ", key, "= ", val, " for encoder ")
-			}
-		}
+		return fmt.Errorf("NewContextWithCodec: %w", err)
 	}
 
+	// --- 4) Create & attach CUDA hw device (auto-upload from SW frames)
+	var hwDev *C.AVBufferRef
+	if C.av_hwdevice_ctx_create(&hwDev, C.AV_HWDEVICE_TYPE_CUDA, nil, nil, 0) < 0 || hwDev == nil {
+		return fmt.Errorf("failed to create CUDA hw device")
+	}
+	println("hwDev: ", hwDev)
+	ctx.encCodec.CAVCodecContext.hw_device_ctx = C.av_buffer_ref(hwDev)
+
+	println("ctx.encCodec.CAVCodecContext.hw_device_ctx: ", ctx.encCodec.CAVCodecContext.hw_device_ctx)
+
+	// Create hw frames ctx (GPU surface pool)
+	hwframeCtx := C.av_hwframe_ctx_alloc(hwDev)
+	if unsafe.Pointer(hwframeCtx) == nil {
+		return fmt.Errorf("av_hwframe_ctx_alloc failed")
+	}
+	println("hwFrameCtx: ", hwframeCtx)
+
+	framesCtx := (*C.AVHWFramesContext)(unsafe.Pointer(hwframeCtx.data))
+	framesCtx.format = C.AV_PIX_FMT_CUDA
+	framesCtx.sw_format = C.AV_PIX_FMT_NV12
+	framesCtx.width = C.int(ctx.srcW)
+	framesCtx.height = C.int(ctx.srcH)
+	if int(C.av_hwframe_ctx_init(hwframeCtx)) < 0 {
+		return fmt.Errorf("Could not initiate hwframe context")
+	}
+	ctx.hwframeCtx = hwframeCtx
+	ctx.encCodec.CAVCodecContext.hw_frames_ctx = C.av_buffer_ref(hwframeCtx)
+	ctx.swsCtx = C.sws_getContext(C.int(ctx.srcW), C.int(ctx.srcH), ctx.decCodec.CAVCodecContext.pix_fmt,
+		C.int(ctx.srcW), C.int(ctx.srcH), framesCtx.sw_format,
+		C.SWS_BILINEAR, nil, nil, nil)
+
+	// --- 5) Basic fields / time base / fps
+	// NOTE: feed NV12 frames (or convert prior to SendFrame)
+	w, _ := strconv.Atoi(params["width"])
+	h, _ := strconv.Atoi(params["height"])
+	fps, _ := strconv.Atoi(params["framerate"])
+
+	ctx.encCodec.CAVCodecContext.width = C.int(w)
+	ctx.encCodec.CAVCodecContext.height = C.int(h)
+
+	ctx.encCodec.SetTimeBase(NewRational(1, fps))
+	ctx.encCodec.SetFrameRate(NewRational(fps, 1))
+
+	// Low-latency: no B-frames
+	ctx.encCodec.CAVCodecContext.max_b_frames = 0
+
+	// GOP
+	g, _ := strconv.Atoi(params["gop_size"])
+	ctx.encCodec.CAVCodecContext.gop_size = C.int(g)
+
+	// Bitrate
+	br, _ := strconv.Atoi(params["bitrate"])
+	ctx.encCodec.CAVCodecContext.bit_rate = C.long(br)
+
+	ctx.encCodec.CAVCodecContext.pix_fmt = C.AV_PIX_FMT_CUDA
+
+	// --- 6) Apply encoder options
+
+	options := NewDictionary()
+	defer options.Free()
+	// Only pass actual encoder private opts through the OptionAccessor/Dictionary
+	for _, k := range []string{"preset", "tune", "rc", "zerolatency"} {
+		_ = options.Set(k, params[k])
+	}
+
+	if err := ctx.encCodec.OpenWithCodec(codec, options); err != nil {
+		return fmt.Errorf("OpenWithCodec: %w", err)
+	}
+
+	// --- 7) Muxer: IVF with AV1 (works fine)
 	ctx.encFmt = &FormatContext{}
-	C.avformat_alloc_output_context2(&ctx.encFmt.CAVFormatContext, nil, C.CString("ivf"), C.CString("output.ivf"))
-
-	C.avio_open(&ctx.encFmt.CAVFormatContext.pb, C.CString("output.ivf"), C.AVIO_FLAG_WRITE)
-
-	ctx.encCodec.OpenWithCodec(codec, options)
-
-	if ctx.encStream, err = ctx.encFmt.NewStreamWithCodec(codec); err != nil {
-		log.Fatalln("cannot create a new stream")
-		return err
+	if C.avformat_alloc_output_context2(&ctx.encFmt.CAVFormatContext, nil, C.CString("mp4"), C.CString("output.mp4")) < 0 {
+		return fmt.Errorf("alloc_output_context2 failed")
+	}
+	if C.avio_open(&ctx.encFmt.CAVFormatContext.pb, C.CString("output.mp4"), C.AVIO_FLAG_WRITE) < 0 {
+		return fmt.Errorf("avio_open failed")
 	}
 
+	// New stream
+	if ctx.encStream, err = ctx.encFmt.NewStreamWithCodec(codec); err != nil {
+		return fmt.Errorf("NewStreamWithCodec: %w", err)
+	}
+
+	// Copy parameters and align time bases
 	C.avcodec_parameters_from_context(ctx.encStream.CAVStream.codecpar, ctx.encCodec.CAVCodecContext)
 	ctx.encStream.TimeBase().SetDenominator(ctx.encCodec.TimeBase().Denominator())
 	ctx.encStream.TimeBase().SetNumerator(ctx.encCodec.TimeBase().Numerator())
@@ -226,17 +250,40 @@ func openEncoder(ctx *context) error {
 
 	C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString("output.ivf"), 1)
 
-	C.avformat_write_header(ctx.encFmt.CAVFormatContext, nil)
-
-	for {
-		encodeStream(ctx)
+	if C.avformat_write_header(ctx.encFmt.CAVFormatContext, nil) < 0 {
+		return fmt.Errorf("avformat_write_header failed")
 	}
 
+	println("done")
+	return nil
 }
 
-func TranscodeY4MToH264(ctx *context, inputFileName string) error {
-	openDecoder(ctx, inputFileName)
-	openEncoder(ctx)
+func decode(ctx *context) {
+	for decodeStream(ctx) {
+	}
+	close(frameChan)
+}
+
+func encode(ctx *context) {
+	for {
+		done, _ := encodeStream(ctx)
+		if done {
+			break
+		}
+	}
+}
+
+func TranscodeY4MToH265(ctx *context, inputFileName string) error {
+	if err := setupDecoder(ctx, inputFileName); err != nil {
+		println(err.Error())
+	}
+	if err := setupEncoder(ctx); err != nil {
+		println(err.Error())
+	}
+
+	decode(ctx)
+	encode(ctx)
+
 	return nil
 }
 
@@ -272,9 +319,6 @@ func decodeStream(ctx *context) bool {
 	}
 
 	for int(code) >= 0 {
-		if ctx.decFrame, err = NewFrame(); err != nil {
-			println("Unable to alloc a new frame for decoding")
-		}
 		frame := ctx.decFrame
 		cFrame := (*C.AVFrame)(unsafe.Pointer(frame.CAVFrame))
 
@@ -286,27 +330,55 @@ func decodeStream(ctx *context) bool {
 			return false
 		}
 
-		frameChan <- frame
+		if ret := C.av_frame_make_writable(ctx.swNV12.CAVFrame); ret < 0 {
+			panic("make_writable swNV12")
+		}
+
+		C.sws_scale(ctx.swsCtx,
+			(**C.uint8_t)(&frame.CAVFrame.data[0]), (*C.int)(&frame.CAVFrame.linesize[0]),
+			0, C.int(ctx.srcH),
+			(**C.uint8_t)(&ctx.swNV12.CAVFrame.data[0]), (*C.int)(&ctx.swNV12.CAVFrame.linesize[0]),
+		)
+
+		hwFrame, _ := NewFrame()
+		if int(C.av_hwframe_get_buffer(ctx.hwframeCtx, hwFrame.CAVFrame, 0)) < 0 {
+			panic("sadfasdf")
+		}
+		if int(C.av_hwframe_transfer_data(hwFrame.CAVFrame, ctx.swNV12.CAVFrame, 0)) < 0 {
+			panic("pashm")
+		}
+		frameChan <- hwFrame
+
+		frame.Unref()
+		// ctx.swNV12.Unref()
+
 	}
 	return true
 }
 
 var ecnt = 0
 
-func encodeStream(ctx *context) error {
+func encodeStream(ctx *context) (bool, error) {
 	var err error
-	frame := <-frameChan
-	frame.CAVFrame.pts = C.long(ecnt)
-	ecnt += 1
 
-	println("Feeding frame", ecnt, frame.CAVFrame, frame.CAVFrame.height, " x ", frame.CAVFrame.width)
+	frame, ok := <-frameChan
+	if !ok {
+		frame = nil
+	} else {
+		frame.CAVFrame.pts = C.long(ecnt)
+		ecnt += 1
+	}
+	println(frame, ok)
+
 	err = ctx.encCodec.FeedFrame(frame)
 	if err != nil {
 		println(err.Error())
-		return err
+		return false, err
 	}
 
-	frame.Free()
+	if ok {
+		frame.Free()
+	}
 
 	if ctx.encPkt == nil {
 		ctx.encPkt, _ = NewPacket()
@@ -314,20 +386,35 @@ func encodeStream(ctx *context) error {
 	for {
 		if err != nil {
 			println("unable to allocate new packet for encoding")
-			return err
+			return false, err
 		}
 		ret := ctx.encCodec.GetPacket(ctx.encPkt)
-		if ret == -11 {
+		if ret == int(AVERROR(C.EAGAIN)) {
 			break
 		} else if ret == 0 {
 			println("Successfully got a packet", ecnt, ctx.encPkt.Size())
 			ctx.encPkt.RescaleTime(ctx.encCodec.TimeBase(), ctx.encStream.TimeBase())
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
 			ctx.encPkt.Unref()
+		} else if ret == int(C.AVERROR_EOF) {
+			break
 		}
 	}
 
-	return nil
+	if !ok {
+		C.av_write_trailer(ctx.encFmt.CAVFormatContext)
+
+		// 3. Close the output file handle
+		if ctx.encFmt.CAVFormatContext.pb != nil {
+			C.avio_closep(&ctx.encFmt.CAVFormatContext.pb)
+		}
+
+		// 4. Free the format context
+		C.avformat_free_context(ctx.encFmt.CAVFormatContext)
+		return true, nil
+	}
+
+	return false, nil
 }
 
 func AVERROR(e int) C.int {
@@ -335,7 +422,6 @@ func AVERROR(e int) C.int {
 }
 
 func main() {
-	ctx := &context{}
-	TranscodeY4MToH264(ctx, "input.y4m")
-
+	ctx := &context{dstW: 2560, dstH: 1440}
+	TranscodeY4MToH265(ctx, "input.y4m")
 }

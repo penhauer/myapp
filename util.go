@@ -236,6 +236,8 @@ func (ctx *CodecContext) GetPacket(pkt *Packet) int {
 	cPkt := (*C.AVPacket)(unsafe.Pointer(pkt.CAVPacket))
 	code := int(C.avcodec_receive_packet(ctx.CAVCodecContext, cPkt))
 	if code < 0 {
+		e := NewErrorFromCode(ErrorCode(code))
+		println("the code is ", code, e.code, e.Error())
 		println("Get packet error", code)
 	}
 	return code
@@ -248,8 +250,8 @@ func (ctx *CodecContext) FeedFrame(frame *Frame) error {
 	}
 	code := int(C.avcodec_send_frame(ctx.CAVCodecContext, cFrame))
 	if code != 0 {
-		println("the code is ", code)
-		return NewErrorFromCode(ErrorCode(code))
+		e := NewErrorFromCode(ErrorCode(code))
+		return e
 	}
 	return nil
 }
@@ -265,6 +267,7 @@ func (ctx *CodecContext) OpenWithCodec(codec *Codec, options *Dictionary) error 
 	}
 	code := C.avcodec_open2(ctx.CAVCodecContext, cCodec, cOptions)
 	if code < 0 {
+		println("Code is ", code)
 		return NewErrorFromCode(ErrorCode(code))
 	}
 	return nil
