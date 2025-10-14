@@ -27,13 +27,14 @@ import (
 	"C"
 )
 import (
+	"context"
 	"fmt"
 	"log"
 	"strconv"
 	"unsafe"
 )
 
-type context struct {
+type TranscodingCtx struct {
 	// decoding
 	decFmt    *FormatContext
 	decStream *Stream
@@ -68,24 +69,22 @@ type context struct {
 	dstH int
 }
 
-func setupDecoder(ctx *context, inputFileName string) error {
+func setupDecoder(ctx *TranscodingCtx, inputFileName string) error {
 	var err error
 	ctx.decFmt, err = NewContextForInput()
 	if err != nil {
-		log.Fatalf("Failed to open input context: %v\n", err)
-		return err
+		return fmt.Errorf("failed to open input context: %v", err)
 	}
 
 	options := NewDictionary()
 	defer options.Free()
 
 	if err := ctx.decFmt.OpenInput(inputFileName, nil, options); err != nil {
-		log.Fatalf("Failed to open input file: %v\n", err)
-		return err
+		return fmt.Errorf("failed to open input file: %v", err)
 	}
 
 	if err := ctx.decFmt.FindStreamInfo(nil); err != nil {
-		return err
+		return fmt.Errorf("could not find stream info: %v", err)
 	}
 
 	ctx.decFmt.Dump(0, inputFileName, false)
@@ -95,8 +94,7 @@ func setupDecoder(ctx *context, inputFileName string) error {
 	codec := NewCodecFromC(unsafe.Pointer(C.avcodec_find_decoder((C.enum_AVCodecID)(codecID))))
 
 	if ctx.decCodec, err = NewContextWithCodec(codec); err != nil {
-		log.Fatalf("Failed to create codec context: %v\n", err)
-		return err
+		return fmt.Errorf("failed to create codec context: %v", err)
 	}
 
 	C.avcodec_parameters_to_context(ctx.decCodec.CAVCodecContext, ctx.decStream.CAVStream.codecpar)
@@ -126,10 +124,9 @@ func setupDecoder(ctx *context, inputFileName string) error {
 	return nil
 }
 
-func setupEncoder(ctx *context) error {
+func setupEncoder(ctx *TranscodingCtx) error {
 	var err error
 
-	// codecName := "av1_nvenc"
 	codecName := "hevc_nvenc"
 	codec := FindEncoderByName(codecName)
 	if codec == nil {
@@ -182,7 +179,7 @@ func setupEncoder(ctx *context) error {
 	framesCtx.width = C.int(ctx.srcW)
 	framesCtx.height = C.int(ctx.srcH)
 	if int(C.av_hwframe_ctx_init(hwframeCtx)) < 0 {
-		return fmt.Errorf("Could not initiate hwframe context")
+		return fmt.Errorf("could not initiate hwframe context")
 	}
 	ctx.hwframeCtx = hwframeCtx
 	ctx.encCodec.CAVCodecContext.hw_frames_ctx = C.av_buffer_ref(hwframeCtx)
@@ -248,48 +245,52 @@ func setupEncoder(ctx *context) error {
 	ctx.encStream.TimeBase().SetNumerator(ctx.encCodec.TimeBase().Numerator())
 	ctx.encStream.SetAverageFrameRate(ctx.encCodec.FrameRate())
 
-	C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString("output.ivf"), 1)
+	C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString("output.mp4"), 1)
 
 	if C.avformat_write_header(ctx.encFmt.CAVFormatContext, nil) < 0 {
 		return fmt.Errorf("avformat_write_header failed")
 	}
 
-	println("done")
 	return nil
 }
 
-func decode(ctx *context) {
+func decode(ctx *TranscodingCtx) {
 	for decodeStream(ctx) {
+		println("Pushed frame")
 	}
 	close(frameChan)
 }
 
-func encode(ctx *context) {
+func encode(ctx *TranscodingCtx, cancel context.CancelFunc) {
 	for {
 		done, _ := encodeStream(ctx)
 		if done {
 			break
 		}
 	}
+	cancel()
 }
 
-func TranscodeY4MToH265(ctx *context, inputFileName string) error {
+func TranscodeY4MToH265(ctx *TranscodingCtx, inputFileName string) error {
 	if err := setupDecoder(ctx, inputFileName); err != nil {
-		println(err.Error())
+		return err
 	}
 	if err := setupEncoder(ctx); err != nil {
-		println(err.Error())
+		return err
 	}
 
-	decode(ctx)
-	encode(ctx)
+	doneCtx, doneCancel := context.WithCancel(context.Background())
 
+	go decode(ctx)
+	go encode(ctx, doneCancel)
+
+	<-doneCtx.Done()
 	return nil
 }
 
 var frameChan chan *Frame = make(chan *Frame, 1000)
 
-func decodeStream(ctx *context) bool {
+func decodeStream(ctx *TranscodingCtx) bool {
 	var err error
 	if ctx.decPkt, err = NewPacket(); err != nil {
 		println("unable to allocate new packet for decoding")
@@ -358,7 +359,7 @@ func decodeStream(ctx *context) bool {
 
 var ecnt = 0
 
-func encodeStream(ctx *context) (bool, error) {
+func encodeStream(ctx *TranscodingCtx) (bool, error) {
 	var err error
 
 	frame, ok := <-frameChan
@@ -368,7 +369,7 @@ func encodeStream(ctx *context) (bool, error) {
 		frame.CAVFrame.pts = C.long(ecnt)
 		ecnt += 1
 	}
-	println(frame, ok)
+	println("here", frame, ok)
 
 	err = ctx.encCodec.FeedFrame(frame)
 	if err != nil {
@@ -384,10 +385,6 @@ func encodeStream(ctx *context) (bool, error) {
 		ctx.encPkt, _ = NewPacket()
 	}
 	for {
-		if err != nil {
-			println("unable to allocate new packet for encoding")
-			return false, err
-		}
 		ret := ctx.encCodec.GetPacket(ctx.encPkt)
 		if ret == int(AVERROR(C.EAGAIN)) {
 			break
@@ -422,6 +419,6 @@ func AVERROR(e int) C.int {
 }
 
 func main() {
-	ctx := &context{dstW: 2560, dstH: 1440}
+	ctx := &TranscodingCtx{dstW: 2560, dstH: 1440}
 	TranscodeY4MToH265(ctx, "input.y4m")
 }
