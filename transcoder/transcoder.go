@@ -399,6 +399,7 @@ func encodeStream(ctx *TranscodingCtx) (bool, error, []byte) {
 				ctx.f.Write(frameBytes)
 			}
 
+			fmt.Printf("frame: %v \n", ctx.frameCnt)
 			PrintHEVCNALs(frameBytes)
 
 			data = append(data, frameBytes...)
