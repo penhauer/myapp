@@ -236,9 +236,9 @@ func (ctx *CodecContext) GetPacket(pkt *Packet) int {
 	cPkt := (*C.AVPacket)(unsafe.Pointer(pkt.CAVPacket))
 	code := int(C.avcodec_receive_packet(ctx.CAVCodecContext, cPkt))
 	if code < 0 {
-		e := NewErrorFromCode(ErrorCode(code))
-		println("the code is ", code, e.code, e.Error())
-		println("Get packet error", code)
+		// e := NewErrorFromCode(ErrorCode(code))
+		// println("the code is ", code, e.code, e.Error())
+		// println("Get packet error", code)
 	}
 	return code
 }
@@ -396,6 +396,10 @@ func (pkt *Packet) Free() {
 
 func (pkt *Packet) StreamIndex() int {
 	return int(pkt.CAVPacket.stream_index)
+}
+
+func (pkt *Packet) SetStreamIndex(streamIndex int) {
+	pkt.CAVPacket.stream_index = (C.int)(streamIndex)
 }
 
 func NewPacket() (*Packet, error) {

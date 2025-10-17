@@ -17,7 +17,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/ivfwriter"
+	"github.com/pion/webrtc/v4/pkg/media/h265writer"
 )
 
 func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
@@ -100,6 +100,27 @@ func main() {
 		if err := json.NewDecoder(req.Body).Decode(&sdp); err != nil {
 			panic(err)
 		}
+		// // Print the decoded SessionDescription and the raw SDP string so you can inspect them.
+		// if b, err := json.MarshalIndent(sdp, "", "  "); err == nil {
+		// 	fmt.Println("Decoded SDP (JSON):")
+		// 	fmt.Println(string(b))
+
+		// } else {
+		// 	fmt.Printf("failed to marshal sdp: %v\n", err)
+		// }
+
+		// {
+		// 	file, err := os.Create("r.sdp")
+		// 	if err != nil {
+		// 		panic(err)
+		// 	}
+		// 	defer file.Close() // ensures the file is closed when the function exits
+
+		// 	_, err = file.WriteString(sdp.SDP)
+		// 	if err != nil {
+		// 		panic(err)
+		// 	}
+		// }
 
 		if err := peerConnection.SetRemoteDescription(sdp); err != nil {
 			panic(err)
@@ -172,23 +193,22 @@ func main() {
 }
 
 func handle_video(peerConnection *webrtc.PeerConnection) {
-	ivfFile, err := ivfwriter.New("output.ivf", ivfwriter.WithCodec("video/VP8"))
+	writer, err := h265writer.New("received.h265")
 	if err != nil {
 		panic(err)
 	}
 
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) { //nolint: revive
 		codec := track.Codec()
-		if strings.EqualFold(codec.MimeType, webrtc.MimeTypeVP8) {
-			fmt.Println("Got VP8 track, saving to disk as output.ivf")
-			saveToDisk(ivfFile, track)
+		if strings.EqualFold(codec.MimeType, webrtc.MimeTypeH265) {
+			fmt.Println("Got H265 track, saving to disk as recevied.265")
+			saveToDisk(writer, track)
 		}
 	})
 
 }
 
 func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
-
 	defer func() {
 		if err := writer.Close(); err != nil {
 			panic(err)
@@ -197,6 +217,8 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 
 	for {
 		rtpPacket, _, err := track.ReadRTP()
+
+		// println("received rtp packet", rtpPacket.SequenceNumber, len(rtpPacket.Payload))
 
 		if err != nil {
 			fmt.Println(err)

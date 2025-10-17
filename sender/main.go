@@ -7,11 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -25,7 +21,8 @@ import (
 	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/ivfreader"
+
+	"myapp/transcoder"
 )
 
 func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
@@ -239,28 +236,20 @@ func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context
 		panic("Could not find `" + videoFileName + "`")
 	}
 
-	file, openErr := os.Open(videoFileName)
-	if openErr != nil {
-		panic(openErr)
+	var vps, sps, pps []byte
+
+	sender, err := InitRTPH264("127.0.0.1", 5004, vps, sps, pps, "video.sdp")
+	if err != nil {
+		panic(err)
 	}
 
-	_, header, openErr := ivfreader.NewWith(file)
-	if openErr != nil {
-		panic(openErr)
-	}
+	_ = &transcoder.TranscodingCtx{}
+	tCtx := &transcoder.TranscodingCtx{InputFile: "input.y4m", SrcW: 2560, SrcH: 1440}
+	fsCtx := &transcoder.FrameServingContext{}
+	fsCtx.Init(tCtx)
+	println("Done initiating")
 
-	// Determine video codec
-	var trackCodec string
-	switch header.FourCC {
-	case "AV01":
-		trackCodec = webrtc.MimeTypeAV1
-	case "VP90":
-		trackCodec = webrtc.MimeTypeVP9
-	case "VP80":
-		trackCodec = webrtc.MimeTypeVP8
-	default:
-		panic(fmt.Sprintf("Unable to handle FourCC %s", header.FourCC))
-	}
+	trackCodec := webrtc.MimeTypeH265
 
 	// Create a video track
 	videoTrack, videoTrackErr := webrtc.NewTrackLocalStaticSample(
@@ -288,77 +277,25 @@ func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context
 	}()
 
 	go func() {
-		// Open a IVF file and start reading using our IVFReader
-		file, ivfErr := os.Open(videoFileName)
-		if ivfErr != nil {
-			panic(ivfErr)
-		}
-
-		ivf, header, ivfErr := ivfreader.NewWith(file)
-		if ivfErr != nil {
-			panic(ivfErr)
-		}
-
-		// Wait for connection established
-
 		<-iceConnectedCtx.Done()
 
-		// Send our video file frame at a time. Pace our sending so we send it at the same speed it should be played back as.
-		// This isn't required since the video is timestamped, but we will such much higher loss if we send all at once.
-		//
-		// It is important to use a time.Ticker instead of time.Sleep because
-		// * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
-		// * works around latency issues with Sleep (see https://github.com/golang/go/issues/44343)
-
-		fmt.Printf("IVF Header Information:\n")
-		fmt.Printf("FourCC: %s\n", header.FourCC)
-		fmt.Printf("Width: %d\n", header.Width)
-		fmt.Printf("Height: %d\n", header.Height)
-		fmt.Printf("Timebase Numerator: %d\n", header.TimebaseNumerator)
-		fmt.Printf("Timebase Denominator: %d\n", header.TimebaseDenominator)
-		fmt.Printf("Number of Frames: %d\n", header.NumFrames)
-
-		duration := time.Millisecond * time.Duration((float32(header.TimebaseNumerator)/float32(header.TimebaseDenominator))*1000)
+		println("herere")
+		duration := time.Millisecond * time.Duration(1000/30)
 		ticker := time.NewTicker(duration)
 
+		var fcnt int = 0
 		defer ticker.Stop()
-		var cnt = 0
 		for ; true; <-ticker.C {
+
+			fcnt += 1
 
 			targetBitrate := estimator.GetTargetBitrate()
 			fmt.Println("target bitrate is ", targetBitrate)
+			frame := fsCtx.GetNextFrame()
 
-			frame, header, ivfErr := ivf.ParseNextFrame()
-			if errors.Is(ivfErr, io.EOF) {
-				fmt.Printf("All video frames parsed and sent")
-				peerConnection.Close()
-				os.Exit(0)
-			}
-
-			if ivfErr != nil {
-				panic(ivfErr)
-			}
-
-			// for debugging video
-			{
-				cnt += 1
-				hash := sha256.Sum256(frame)
-				hashStr := base64.StdEncoding.EncodeToString(hash[:])
-
-				// headerBytes := make([]byte, 12)
-				headerBytes := new(bytes.Buffer)
-				if err := binary.Write(headerBytes, binary.BigEndian, header); err != nil {
-					panic(err)
-				}
-				headerHash := sha256.Sum256(headerBytes.Bytes())
-				headerHashStr := base64.StdEncoding.EncodeToString(headerHash[:])
-
-				fmt.Println("frame ", cnt, " with frame size ", header.FrameSize, "with timestamp", header.Timestamp)
-				fmt.Println("Sending frame ", cnt, " with header hash", headerHashStr, " with hash ", hashStr)
-			}
-
-			if ivfErr = videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); ivfErr != nil {
-				panic(ivfErr)
+			SendH264AnnexBFrame(sender, frame, uint32(fcnt*90000), false)
+			if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
+				panic(err)
 			}
 		}
 	}()
