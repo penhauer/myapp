@@ -36,6 +36,9 @@ import (
 )
 
 type TranscodingCtx struct {
+	// Codec
+	Codec string
+
 	// input
 	InputFile string
 	// todo: remove later
@@ -137,10 +140,9 @@ func setupDecoder(ctx *TranscodingCtx) error {
 func setupEncoder(ctx *TranscodingCtx) error {
 	var err error
 
-	codecName := "hevc_nvenc"
-	codec := FindEncoderByName(codecName)
+	codec := FindEncoderByName(ctx.Codec)
 	if codec == nil {
-		log.Fatalf("Could not find encoder %s", codecName)
+		log.Fatalf("Could not find encoder %s", ctx.Codec)
 		return fmt.Errorf("encoder not found")
 	}
 
