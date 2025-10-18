@@ -57,7 +57,7 @@ func main() { //nolint:gocognit,cyclop,gocyclo,maintidx
 	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
 
 	// Create a video track
-	trackCodec := webrtc.MimeTypeH265
+	trackCodec := webrtc.MimeTypeH264
 	videoTrack, videoTrackErr := webrtc.NewTrackLocalStaticSample(
 		webrtc.RTPCodecCapability{MimeType: trackCodec}, "video", "pion",
 	)
@@ -83,17 +83,19 @@ func main() { //nolint:gocognit,cyclop,gocyclo,maintidx
 	}()
 
 	go func() {
-		// Open a IVF file and start reading using our IVFReader
+		codecName := "h264_nvenc"
+		tCtx := transcoder.NewTranscodingCtx(
+			2560, 1440,
+			codecName,
+			"input.y4m",
+			true,
+		)
 
-		_ = &transcoder.TranscodingCtx{}
-		tCtx := &transcoder.TranscodingCtx{InputFile: videoFileName, SrcW: 2560, SrcH: 1440}
 		fsCtx := &transcoder.FrameServingContext{}
 		fsCtx.Init(tCtx)
 
 		// Wait for connection established
 		<-iceConnectedCtx.Done()
-
-		println("Sennnnding")
 
 		// Send our video file frame at a time. Pace our sending so we send it at the same speed it should be played back as.
 		// This isn't required since the video is timestamped, but we will such much higher loss if we send all at once.
@@ -102,7 +104,7 @@ func main() { //nolint:gocognit,cyclop,gocyclo,maintidx
 		// * avoids accumulating skew, just calling time.Sleep didn't compensate for the time spent parsing the data
 		// * works around latency issues with Sleep (see https://github.com/golang/go/issues/44343)
 		ticker := time.NewTicker(
-			time.Millisecond * time.Duration(1000/30),
+			time.Millisecond * time.Duration(1000/60),
 		)
 		defer ticker.Stop()
 		for ; true; <-ticker.C {

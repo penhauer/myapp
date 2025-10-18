@@ -35,14 +35,15 @@ import (
 	"unsafe"
 )
 
-type TranscodingCtx struct {
+type transcodingCtx struct {
 	// Codec
 	Codec string
 
 	// input
 	InputFile string
 	// todo: remove later
-	f *os.File
+	f         *os.File
+	loopVideo bool
 
 	// decoding
 	decFmt    *FormatContext
@@ -65,9 +66,6 @@ type TranscodingCtx struct {
 	frameChan chan *Frame
 	frameCnt  int
 
-	// transcoding
-	filterGraph *Graph
-
 	//sws
 	swsCtx *C.struct_SwsContext
 	swNV12 *Frame
@@ -76,13 +74,23 @@ type TranscodingCtx struct {
 	hwframeCtx *C.AVBufferRef
 
 	//params
-	SrcW int
-	SrcH int
+	srcW int
+	srcH int
 	dstW int
 	dstH int
 }
 
-func setupDecoder(ctx *TranscodingCtx) error {
+func NewTranscodingCtx(srcW, srcH int, codec, inputFile string, loopVideo bool) *transcodingCtx {
+	return &transcodingCtx{
+		srcW:      srcW,
+		srcH:      srcH,
+		Codec:     codec,
+		InputFile: inputFile,
+		loopVideo: loopVideo,
+	}
+}
+
+func setupDecoder(ctx *transcodingCtx) error {
 	var err error
 	ctx.decFmt, err = NewContextForInput()
 	if err != nil {
@@ -122,13 +130,13 @@ func setupDecoder(ctx *TranscodingCtx) error {
 		return fmt.Errorf("failed to create a frame: %w", err)
 	}
 
-	ctx.SrcW = int(ctx.decCodec.CAVCodecContext.width)
-	ctx.SrcH = int(ctx.decCodec.CAVCodecContext.height)
+	ctx.srcW = int(ctx.decCodec.CAVCodecContext.width)
+	ctx.srcH = int(ctx.decCodec.CAVCodecContext.height)
 
 	ctx.swNV12, _ = NewFrame()
 	ctx.swNV12.CAVFrame.format = C.AV_PIX_FMT_NV12
-	ctx.swNV12.CAVFrame.width = C.int(ctx.SrcW)
-	ctx.swNV12.CAVFrame.height = C.int(ctx.SrcH)
+	ctx.swNV12.CAVFrame.width = C.int(ctx.srcW)
+	ctx.swNV12.CAVFrame.height = C.int(ctx.srcH)
 
 	if int(C.av_frame_get_buffer(ctx.swNV12.CAVFrame, 0)) < 0 {
 		return fmt.Errorf("failed to allocate buffer for FMT_NV12 frame")
@@ -137,7 +145,7 @@ func setupDecoder(ctx *TranscodingCtx) error {
 	return nil
 }
 
-func setupEncoder(ctx *TranscodingCtx) error {
+func setupEncoder(ctx *transcodingCtx) error {
 	var err error
 
 	codec := FindEncoderByName(ctx.Codec)
@@ -190,15 +198,15 @@ func setupEncoder(ctx *TranscodingCtx) error {
 	framesCtx := (*C.AVHWFramesContext)(unsafe.Pointer(hwframeCtx.data))
 	framesCtx.format = C.AV_PIX_FMT_CUDA
 	framesCtx.sw_format = C.AV_PIX_FMT_NV12
-	framesCtx.width = C.int(ctx.SrcW)
-	framesCtx.height = C.int(ctx.SrcH)
+	framesCtx.width = C.int(ctx.srcW)
+	framesCtx.height = C.int(ctx.srcH)
 	if int(C.av_hwframe_ctx_init(hwframeCtx)) < 0 {
 		return fmt.Errorf("could not initiate hwframe context")
 	}
 	ctx.hwframeCtx = hwframeCtx
 	ctx.encCodec.CAVCodecContext.hw_frames_ctx = C.av_buffer_ref(hwframeCtx)
-	ctx.swsCtx = C.sws_getContext(C.int(ctx.SrcW), C.int(ctx.SrcH), ctx.decCodec.CAVCodecContext.pix_fmt,
-		C.int(ctx.SrcW), C.int(ctx.SrcH), framesCtx.sw_format,
+	ctx.swsCtx = C.sws_getContext(C.int(ctx.srcW), C.int(ctx.srcH), ctx.decCodec.CAVCodecContext.pix_fmt,
+		C.int(ctx.srcW), C.int(ctx.srcH), framesCtx.sw_format,
 		C.SWS_BILINEAR, nil, nil, nil)
 
 	// --- 5) Basic fields / time base / fps
@@ -270,12 +278,12 @@ func setupEncoder(ctx *TranscodingCtx) error {
 	return nil
 }
 
-func decode(ctx *TranscodingCtx) {
+func decode(ctx *transcodingCtx) {
 	for decodeStream(ctx) {
 	}
 }
 
-func encode(ctx *TranscodingCtx, cancel context.CancelFunc) {
+func encode(ctx *transcodingCtx, cancel context.CancelFunc) {
 	for {
 		done, _, _ := encodeStream(ctx)
 		if done {
@@ -285,7 +293,8 @@ func encode(ctx *TranscodingCtx, cancel context.CancelFunc) {
 	cancel()
 }
 
-func decodeStream(ctx *TranscodingCtx) bool {
+// returns false if EOF reached otherwise true
+func decodeStream(ctx *transcodingCtx) bool {
 	var err error
 	if ctx.decPkt, err = NewPacket(); err != nil {
 		println("unable to allocate new packet for decoding")
@@ -296,8 +305,7 @@ func decodeStream(ctx *TranscodingCtx) bool {
 		log.Fatalf("Failed to read packet: %v\n", err)
 	}
 	if !reading {
-		close(ctx.frameChan)
-		return false
+		return ctx.handleReadingStopped()
 	}
 	defer ctx.decPkt.Unref()
 
@@ -333,7 +341,7 @@ func decodeStream(ctx *TranscodingCtx) bool {
 
 		C.sws_scale(ctx.swsCtx,
 			(**C.uint8_t)(&frame.CAVFrame.data[0]), (*C.int)(&frame.CAVFrame.linesize[0]),
-			0, C.int(ctx.SrcH),
+			0, C.int(ctx.srcH),
 			(**C.uint8_t)(&ctx.swNV12.CAVFrame.data[0]), (*C.int)(&ctx.swNV12.CAVFrame.linesize[0]),
 		)
 
@@ -351,12 +359,27 @@ func decodeStream(ctx *TranscodingCtx) bool {
 	return true
 }
 
+func (ctx *transcodingCtx) handleReadingStopped() bool {
+	if !ctx.loopVideo {
+		close(ctx.frameChan)
+		return false
+	}
+
+	ctx.restartPlayback()
+	return true
+}
+
+func (ctx *transcodingCtx) restartPlayback() {
+	C.av_seek_frame(ctx.decFmt.CAVFormatContext, C.int(ctx.decStream.CAVStream.index), 0, C.AVSEEK_FLAG_BACKWARD)
+	C.avcodec_flush_buffers(ctx.decCodec.CAVCodecContext)
+}
+
 func getPacketBytes(p *Packet) []byte {
 	frameBytes := C.GoBytes(unsafe.Pointer(p.CAVPacket.data), C.int(p.Size()))
 	return frameBytes
 }
 
-func encodeStream(ctx *TranscodingCtx) (bool, error, []byte) {
+func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 	var data []byte
 	var err error
 
@@ -437,7 +460,7 @@ func AVERROR(e int) C.int {
 	return -C.int(e)
 }
 
-func setup(ctx *TranscodingCtx) error {
+func setup(ctx *transcodingCtx) error {
 	ctx.frameChan = make(chan *Frame, 1000)
 	ctx.frameCnt = 0
 	if err := setupDecoder(ctx); err != nil {
@@ -449,7 +472,7 @@ func setup(ctx *TranscodingCtx) error {
 	return nil
 }
 
-func TranscodeY4MToH265(ctx *TranscodingCtx) error {
+func TranscodeY4MToH265(ctx *transcodingCtx) error {
 	setup(ctx)
 	doneCtx, doneCancel := context.WithCancel(context.Background())
 	go decode(ctx)
@@ -459,7 +482,7 @@ func TranscodeY4MToH265(ctx *TranscodingCtx) error {
 }
 
 type FrameServingContext struct {
-	transcodingCtx *TranscodingCtx
+	transcodingCtx *transcodingCtx
 
 	bufferGap     int
 	decodingEnded bool
@@ -479,7 +502,7 @@ func (fsCtx *FrameServingContext) startDecoding() {
 	}
 }
 
-func (fsCtx *FrameServingContext) Init(tctx *TranscodingCtx) {
+func (fsCtx *FrameServingContext) Init(tctx *transcodingCtx) {
 	fsCtx.transcodingCtx = tctx
 
 	fsCtx.transcodingCtx.f, _ = os.Create("raw.x265")

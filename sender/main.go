@@ -243,8 +243,12 @@ func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context
 		panic(err)
 	}
 
-	_ = &transcoder.TranscodingCtx{}
-	tCtx := &transcoder.TranscodingCtx{Codec: "hevc_nvenc", InputFile: "input.y4m", SrcW: 2560, SrcH: 1440}
+	tCtx := transcoder.NewTranscodingCtx(
+		2560, 1440,
+		"hevc_nvenc",
+		"input.y4m",
+		false,
+	)
 	fsCtx := &transcoder.FrameServingContext{}
 	fsCtx.Init(tCtx)
 	println("Done initiating")
