@@ -264,13 +264,6 @@ func handle_video(ss *sessionSetup) {
 		panic("Could not find `" + videoFileName + "`")
 	}
 
-	var vps, sps, pps []byte
-
-	sender, err := InitRTPH264("127.0.0.1", 5004, vps, sps, pps, "video.sdp")
-	if err != nil {
-		panic(err)
-	}
-
 	tCtx := transcoder.NewTranscodingCtx(
 		2560, 1440,
 		"hevc_nvenc",
@@ -279,7 +272,6 @@ func handle_video(ss *sessionSetup) {
 	)
 	fsCtx := &transcoder.FrameServingContext{}
 	fsCtx.Init(tCtx)
-	println("Done initiating")
 
 	trackCodec := webrtc.MimeTypeH265
 
@@ -327,7 +319,6 @@ func handle_video(ss *sessionSetup) {
 			fmt.Println("target bitrate is ", targetBitrate)
 			frame := fsCtx.GetNextFrame()
 
-			SendH264AnnexBFrame(sender, frame, uint32(fcnt*90000), false)
 			if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
 				panic(err)
 			}
