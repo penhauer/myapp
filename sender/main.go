@@ -1,7 +1,3 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
-// SPDX-License-Identifier: MIT
-
-// pion-to-pion is an example of two pion instances communicating directly!
 package main
 
 import (
@@ -27,6 +23,10 @@ import (
 
 func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 	payload := []byte(candidate.ToJSON().Candidate)
+
+	x, _ := json.Marshal(candidate.ToJSON())
+	println(getTime(), "signalling candidate ", string(x))
+
 	resp, err := http.Post( //nolint:noctx
 		fmt.Sprintf("http://%s/candidate", addr),
 		"application/json; charset=utf-8",
@@ -39,88 +39,101 @@ func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 	return resp.Body.Close()
 }
 
-//nolint:gocognit, cyclop
-func main() {
+type sessionSetup struct {
+	offerAddr  *string
+	answerAddr *string
 
-	offerAddr := flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
-	answerAddr := flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
-	flag.Parse()
+	peerConnection *webrtc.PeerConnection
+	estimatorChan  chan *cc.BandwidthEstimator
 
-	var candidatesMux sync.Mutex
-	pendingCandidates := make([]*webrtc.ICECandidate, 0)
+	candidatesMux     sync.Mutex
+	pendingCandidates []*webrtc.ICECandidate
 
-	iceConnectedCtx, iceConnectedCtxCancel := context.WithCancel(context.Background())
+	iceConnectedCtx       context.Context
+	iceConnectedCtxCancel context.CancelFunc
+}
 
-	estimatorChan, peerConnection := setup_peer_connection()
-	defer func() {
-		if cErr := peerConnection.Close(); cErr != nil {
-			fmt.Printf("cannot close peerConnection: %v\n", cErr)
-		}
-	}()
+func getTime() string {
+	now := time.Now()
+	return fmt.Sprintf("%02d:%02d:%03d -- ", now.Minute(), now.Second(), now.Nanosecond()/1e6)
+}
 
-	// When an ICE candidate is available send to the other Pion instance
-	// the other Pion instance will add this candidate by calling AddICECandidate
-	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
-			return
-		}
-
-		candidatesMux.Lock()
-		defer candidatesMux.Unlock()
-
-		desc := peerConnection.RemoteDescription()
-		if desc == nil {
-			pendingCandidates = append(pendingCandidates, candidate)
-		} else if onICECandidateErr := signalCandidate(*answerAddr, candidate); onICECandidateErr != nil {
-			panic(onICECandidateErr)
-		}
-	})
-
-	// A HTTP handler that allows the other Pion instance to send us ICE candidates
-	// This allows us to add ICE candidates faster, we don't have to wait for STUN or TURN
-	// candidates which may be slower
-	http.HandleFunc("/candidate", func(res http.ResponseWriter, req *http.Request) { //nolint: revive
-		candidate, candidateErr := io.ReadAll(req.Body)
-		if candidateErr != nil {
-			panic(candidateErr)
-		}
-		if candidateErr := peerConnection.AddICECandidate(
-			webrtc.ICECandidateInit{Candidate: string(candidate)},
-		); candidateErr != nil {
-			panic(candidateErr)
-		}
-	})
-
-	// A HTTP handler that processes a SessionDescription given to us from the other Pion process
-	http.HandleFunc("/sdp", func(res http.ResponseWriter, req *http.Request) { //nolint: revive
+// Sets up a HTTP handler that processes a SessionDescription given to us from the other peer
+func setupSDPHandler(ss *sessionSetup) {
+	http.HandleFunc("/sdp", func(res http.ResponseWriter, req *http.Request) {
 		sdp := webrtc.SessionDescription{}
 		if sdpErr := json.NewDecoder(req.Body).Decode(&sdp); sdpErr != nil {
 			panic(sdpErr)
 		}
 
-		if sdpErr := peerConnection.SetRemoteDescription(sdp); sdpErr != nil {
+		println(getTime(), "Receieved SDP ")
+
+		if sdpErr := ss.peerConnection.SetRemoteDescription(sdp); sdpErr != nil {
 			panic(sdpErr)
 		}
 
-		candidatesMux.Lock()
-		defer candidatesMux.Unlock()
+		ss.candidatesMux.Lock()
+		defer ss.candidatesMux.Unlock()
 
-		for _, c := range pendingCandidates {
-			if onICECandidateErr := signalCandidate(*answerAddr, c); onICECandidateErr != nil {
+		for _, c := range ss.pendingCandidates {
+			if onICECandidateErr := signalCandidate(*ss.answerAddr, c); onICECandidateErr != nil {
 				panic(onICECandidateErr)
 			}
 		}
 	})
-	// Start HTTP server that accepts requests from the answer process
-	// nolint: gosec
-	go func() { panic(http.ListenAndServe(*offerAddr, nil)) }()
+}
 
-	estimator := <-estimatorChan
-	handle_video(peerConnection, iceConnectedCtx, estimator)
+// A HTTP handler that allows the other Pion instance to send us ICE candidates
+// This allows us to add ICE candidates faster, we don't have to wait for STUN or TURN
+// candidates which may be slower
+func setupCandidateHandler(ss *sessionSetup) {
+	http.HandleFunc("/candidate", func(res http.ResponseWriter, req *http.Request) { //nolint: revive
+		candidate, candidateErr := io.ReadAll(req.Body)
+		if candidateErr != nil {
+			panic(candidateErr)
+		}
+		if candidateErr := ss.peerConnection.AddICECandidate(
+			webrtc.ICECandidateInit{Candidate: string(candidate)},
+		); candidateErr != nil {
+			panic(candidateErr)
+		}
+	})
+}
 
+func sendOffer(ss *sessionSetup) {
+	// Create an offer to send to the other process
+	offer, err := ss.peerConnection.CreateOffer(nil)
+	if err != nil {
+		panic(err)
+	}
+
+	// Sets the LocalDescription, and starts our UDP listeners
+	// Note: this will start the gathering of ICE candidates
+	if err = ss.peerConnection.SetLocalDescription(offer); err != nil {
+		panic(err)
+	}
+
+	// Send our offer to the HTTP server listening in the other process
+	payload, err := json.Marshal(offer)
+	if err != nil {
+		panic(err)
+	}
+	resp, err := http.Post( //nolint:noctx
+		fmt.Sprintf("http://%s/sdp", *ss.answerAddr),
+		"application/json; charset=utf-8",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		panic(err)
+	} else if err := resp.Body.Close(); err != nil {
+		panic(err)
+	}
+}
+
+func setupConnectionStateHandler(ss *sessionSetup) {
 	// Set the handler for Peer connection state
 	// This will notify you when the peer has connected/disconnected
-	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+	ss.peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
 
 		if state == webrtc.PeerConnectionStateFailed {
@@ -140,43 +153,59 @@ func main() {
 
 		if state == webrtc.PeerConnectionStateConnected {
 			fmt.Println("Peer Connection has been established")
-			iceConnectedCtxCancel()
+			ss.iceConnectedCtxCancel()
 		}
 	})
+}
 
-	// Create an offer to send to the other process
-	offer, err := peerConnection.CreateOffer(nil)
-	if err != nil {
-		panic(err)
-	}
+func setupICECandidateHandler(ss *sessionSetup) {
+	// When an ICE candidate is available send to the other Pion instance
+	// the other Pion instance will add this candidate by calling AddICECandidate
+	ss.peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			return
+		}
 
-	// Sets the LocalDescription, and starts our UDP listeners
-	// Note: this will start the gathering of ICE candidates
-	if err = peerConnection.SetLocalDescription(offer); err != nil {
-		panic(err)
-	}
+		ss.candidatesMux.Lock()
+		defer ss.candidatesMux.Unlock()
 
-	// Send our offer to the HTTP server listening in the other process
-	payload, err := json.Marshal(offer)
-	if err != nil {
-		panic(err)
-	}
-	resp, err := http.Post( //nolint:noctx
-		fmt.Sprintf("http://%s/sdp", *answerAddr),
-		"application/json; charset=utf-8",
-		bytes.NewReader(payload),
-	)
-	if err != nil {
-		panic(err)
-	} else if err := resp.Body.Close(); err != nil {
-		panic(err)
-	}
+		desc := ss.peerConnection.RemoteDescription()
+		if desc == nil {
+			ss.pendingCandidates = append(ss.pendingCandidates, candidate)
+		} else if onICECandidateErr := signalCandidate(*ss.answerAddr, candidate); onICECandidateErr != nil {
+			panic(onICECandidateErr)
+		}
+	})
+}
 
-	// Block forever
+//nolint:gocognit, cyclop
+func main() {
+	ss := &sessionSetup{}
+
+	ss.offerAddr = flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
+	ss.answerAddr = flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
+	flag.Parse()
+
+	ss.pendingCandidates = make([]*webrtc.ICECandidate, 0)
+	ss.iceConnectedCtx, ss.iceConnectedCtxCancel = context.WithCancel(context.Background())
+	ss.estimatorChan, ss.peerConnection = setupPeerConnection()
+	defer func() {
+		if cErr := ss.peerConnection.Close(); cErr != nil {
+			fmt.Printf("cannot close peerConnection: %v\n", cErr)
+		}
+	}()
+
+	setupICECandidateHandler(ss)
+	setupCandidateHandler(ss)
+	setupSDPHandler(ss)
+	go func() { panic(http.ListenAndServe(*ss.offerAddr, nil)) }()
+	handle_video(ss)
+	setupConnectionStateHandler(ss)
+	sendOffer(ss)
 	select {}
 }
 
-func setup_peer_connection() (chan cc.BandwidthEstimator, *webrtc.PeerConnection) {
+func setupPeerConnection() (chan *cc.BandwidthEstimator, *webrtc.PeerConnection) {
 	interceptorRegistry := &interceptor.Registry{}
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
@@ -191,9 +220,9 @@ func setup_peer_connection() (chan cc.BandwidthEstimator, *webrtc.PeerConnection
 		panic(err)
 	}
 
-	estimatorChan := make(chan cc.BandwidthEstimator, 1)
+	estimatorChan := make(chan *cc.BandwidthEstimator, 1)
 	congestionController.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) { //nolint: revive
-		estimatorChan <- estimator
+		estimatorChan <- &estimator
 	})
 
 	interceptorRegistry.Add(congestionController)
@@ -224,11 +253,10 @@ func setup_peer_connection() (chan cc.BandwidthEstimator, *webrtc.PeerConnection
 }
 
 const (
-	videoFileName = "input.ivf"
+	videoFileName = "input.y4m"
 )
 
-func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context.Context,
-	estimator cc.BandwidthEstimator) {
+func handle_video(ss *sessionSetup) {
 	_, err := os.Stat(videoFileName)
 	haveVideoFile := !os.IsNotExist(err)
 
@@ -263,7 +291,7 @@ func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context
 		panic(videoTrackErr)
 	}
 
-	rtpSender, videoTrackErr := peerConnection.AddTrack(videoTrack)
+	rtpSender, videoTrackErr := ss.peerConnection.AddTrack(videoTrack)
 	if videoTrackErr != nil {
 		panic(videoTrackErr)
 	}
@@ -280,8 +308,10 @@ func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context
 		}
 	}()
 
+	estimator := <-ss.estimatorChan
+
 	go func() {
-		<-iceConnectedCtx.Done()
+		<-ss.iceConnectedCtx.Done()
 
 		println("herere")
 		duration := time.Millisecond * time.Duration(1000/30)
@@ -293,7 +323,7 @@ func handle_video(peerConnection *webrtc.PeerConnection, iceConnectedCtx context
 
 			fcnt += 1
 
-			targetBitrate := estimator.GetTargetBitrate()
+			targetBitrate := (*estimator).GetTargetBitrate()
 			fmt.Println("target bitrate is ", targetBitrate)
 			frame := fsCtx.GetNextFrame()
 
