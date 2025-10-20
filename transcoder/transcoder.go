@@ -420,9 +420,9 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
 
 			// todo: remove later
-			if (ctx.frameCnt%30)%2 == 1 {
-				ctx.f.Write(frameBytes)
-			}
+			// if (ctx.frameCnt%30)%2 == 1 {
+			// 	ctx.f.Write(frameBytes)
+			// }
 
 			fmt.Printf("frame: %v \n", ctx.frameCnt)
 			PrintHEVCNALs(frameBytes)

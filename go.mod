@@ -2,7 +2,10 @@ module myapp
 
 go 1.21.13
 
-require github.com/pion/interceptor v0.1.40
+require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/pion/interceptor v0.1.40
+)
 
 require (
 	github.com/google/uuid v1.6.0 // indirect
@@ -29,5 +32,3 @@ require (
 	github.com/pion/rtp v1.8.21 // indirect
 	github.com/pion/webrtc/v4 v4.1.4
 )
-
-replace github.com/imkira/go-libav => ../go-libav

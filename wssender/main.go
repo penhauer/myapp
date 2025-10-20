@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
@@ -19,7 +22,6 @@ import (
 )
 
 type sessionSetup struct {
-	offerAddr  *string
 	answerAddr *string
 
 	peerConnection *webrtc.PeerConnection
@@ -30,11 +32,6 @@ type sessionSetup struct {
 
 	iceConnectedCtx       context.Context
 	iceConnectedCtxCancel context.CancelFunc
-}
-
-func getTime() string {
-	now := time.Now()
-	return fmt.Sprintf("%02d:%02d:%03d -- ", now.Minute(), now.Second(), now.Nanosecond()/1e6)
 }
 
 func setupConnectionStateHandler(ss *sessionSetup) {
@@ -65,31 +62,10 @@ func setupConnectionStateHandler(ss *sessionSetup) {
 	})
 }
 
-func setupICECandidateHandler(ss *sessionSetup) {
-	// When an ICE candidate is available send to the other Pion instance
-	// the other Pion instance will add this candidate by calling AddICECandidate
-	ss.peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate == nil {
-			return
-		}
-
-		ss.candidatesMux.Lock()
-		defer ss.candidatesMux.Unlock()
-
-		desc := ss.peerConnection.RemoteDescription()
-		if desc == nil {
-			ss.pendingCandidates = append(ss.pendingCandidates, candidate)
-		} else if onICECandidateErr := signalCandidate(*ss.answerAddr, candidate); onICECandidateErr != nil {
-			panic(onICECandidateErr)
-		}
-	})
-}
-
 //nolint:gocognit, cyclop
 func main() {
 	ss := &sessionSetup{}
 
-	ss.offerAddr = flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
 	ss.answerAddr = flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
 	flag.Parse()
 
@@ -102,13 +78,73 @@ func main() {
 		}
 	}()
 
-	setupICECandidateHandler(ss)
-	setupCandidateHandler(ss)
-	setupSDPHandler(ss)
-	go func() { panic(http.ListenAndServe(*ss.offerAddr, nil)) }()
-	handle_video(ss)
+	var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			log.Println("upgrade:", err)
+			return
+		}
+		log.Println("Browser connected to signaling WS")
+
+		offer, err := ss.peerConnection.CreateOffer(nil)
+		if err != nil {
+			panic(err)
+		}
+		ss.peerConnection.SetLocalDescription(offer)
+		conn.WriteJSON(map[string]any{"type": "offer", "sdp": offer})
+
+		ss.peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+			if candidate == nil {
+				return
+			}
+			ss.candidatesMux.Lock()
+			defer ss.candidatesMux.Unlock()
+
+			desc := ss.peerConnection.RemoteDescription()
+			if desc == nil {
+				ss.pendingCandidates = append(ss.pendingCandidates, candidate)
+			} else {
+				conn.WriteJSON(map[string]any{"type": "ice", "candidate": candidate.ToJSON()})
+			}
+		})
+
+		// Receive messages (answer + ICE)
+		for {
+			var msg map[string]any
+			if err := conn.ReadJSON(&msg); err != nil {
+				log.Println("ws read:", err)
+				return
+			}
+			switch msg["type"] {
+			case "answer":
+				b, _ := json.Marshal(msg["sdp"])
+				var s webrtc.SessionDescription
+				_ = json.Unmarshal(b, &s)
+				if err := ss.peerConnection.SetRemoteDescription(s); err != nil {
+					panic(err)
+				}
+				ss.candidatesMux.Lock()
+				defer ss.candidatesMux.Unlock()
+
+				for _, c := range ss.pendingCandidates {
+					conn.WriteJSON(map[string]any{"type": "ice", "candidate": c.ToJSON()})
+				}
+			case "ice":
+				b, _ := json.Marshal(msg["candidate"])
+				var candidate webrtc.ICECandidateInit
+				_ = json.Unmarshal(b, &candidate)
+				if err := ss.peerConnection.AddICECandidate(candidate); err != nil {
+					panic(err)
+				}
+			}
+		}
+	})
+	go func() { panic(http.ListenAndServe("localhost:8080", nil)) }()
+
 	setupConnectionStateHandler(ss)
-	sendOffer(ss)
+	handle_video(ss)
 	select {}
 }
 
@@ -173,14 +209,14 @@ func handle_video(ss *sessionSetup) {
 
 	tCtx := transcoder.NewTranscodingCtx(
 		2560, 1440,
-		"hevc_nvenc",
+		"h264_nvenc",
 		"input.y4m",
-		false,
+		true,
 	)
 	fsCtx := &transcoder.FrameServingContext{}
 	fsCtx.Init(tCtx)
 
-	trackCodec := webrtc.MimeTypeH265
+	trackCodec := webrtc.MimeTypeH264
 
 	// Create a video track
 	videoTrack, videoTrackErr := webrtc.NewTrackLocalStaticSample(
@@ -212,7 +248,6 @@ func handle_video(ss *sessionSetup) {
 	go func() {
 		<-ss.iceConnectedCtx.Done()
 
-		println("herere")
 		duration := time.Millisecond * time.Duration(1000/30)
 		ticker := time.NewTicker(duration)
 
