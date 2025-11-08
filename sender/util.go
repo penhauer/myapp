@@ -37,6 +37,7 @@ func setupCandidateHandler(ss *sessionSetup) {
 		if candidateErr != nil {
 			panic(candidateErr)
 		}
+		println("Received candidate", string(candidate))
 		if candidateErr := ss.peerConnection.AddICECandidate(
 			webrtc.ICECandidateInit{Candidate: string(candidate)},
 		); candidateErr != nil {

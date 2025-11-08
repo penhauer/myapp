@@ -424,8 +424,8 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 			// 	ctx.f.Write(frameBytes)
 			// }
 
-			fmt.Printf("frame: %v \n", ctx.frameCnt)
-			PrintHEVCNALs(frameBytes)
+			// fmt.Printf("frame: %v \n", ctx.frameCnt)
+			// PrintHEVCNALs(frameBytes)
 
 			data = append(data, frameBytes...)
 

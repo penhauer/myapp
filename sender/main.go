@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
@@ -73,6 +76,9 @@ func setupICECandidateHandler(ss *sessionSetup) {
 			return
 		}
 
+		jj, _ := json.Marshal(candidate)
+		println("Signalling ICE candidate ", string(jj))
+
 		ss.candidatesMux.Lock()
 		defer ss.candidatesMux.Unlock()
 
@@ -85,12 +91,16 @@ func setupICECandidateHandler(ss *sessionSetup) {
 	})
 }
 
+var videoFileName string
+
 //nolint:gocognit, cyclop
 func main() {
 	ss := &sessionSetup{}
 
 	ss.offerAddr = flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
 	ss.answerAddr = flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
+	videoFileName = *flag.String("video", "./input.y4m", "video path")
+	print(videoFileName)
 	flag.Parse()
 
 	ss.pendingCandidates = make([]*webrtc.ICECandidate, 0)
@@ -159,11 +169,8 @@ func setupPeerConnection() (chan *cc.BandwidthEstimator, *webrtc.PeerConnection)
 	return estimatorChan, peerConnection
 }
 
-const (
-	videoFileName = "input.y4m"
-)
-
 func handle_video(ss *sessionSetup) {
+	videoFileName = "/home/amirmo/testbed/video/webRTC/video_generator/video_files/4.y4m"
 	_, err := os.Stat(videoFileName)
 	haveVideoFile := !os.IsNotExist(err)
 
@@ -174,7 +181,7 @@ func handle_video(ss *sessionSetup) {
 	tCtx := transcoder.NewTranscodingCtx(
 		2560, 1440,
 		"hevc_nvenc",
-		"input.y4m",
+		videoFileName,
 		false,
 	)
 	fsCtx := &transcoder.FrameServingContext{}
@@ -200,9 +207,42 @@ func handle_video(ss *sessionSetup) {
 	// like NACK this needs to be called.
 	go func() {
 		rtcpBuf := make([]byte, 1500)
+		rtcpPacketBuff := &rtp.PacketBuffer{
+			Payload: rtcpBuf,
+		}
 		for {
-			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-				return
+			if _, rtcpErr := rtpSender.Read(rtcpPacketBuff); rtcpErr == nil {
+				fmt.Println("RTCP packet received")
+
+				// func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
+
+				f := &rtcp.CCFeedbackReport{}
+				err := f.Unmarshal(rtcpPacketBuff.GetReadBuffer())
+				if err != nil {
+					fmt.Println("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+				}
+
+				pkts, uErr := rtcp.Unmarshal(rtcpPacketBuff.GetReadBuffer())
+				if uErr != nil {
+					fmt.Println("failed to unmarshal RTCP packets:", uErr)
+				} else {
+					ecnCount := 0
+					for _, p := range pkts {
+						if fb, ok := p.(*rtcp.CCFeedbackReport); ok {
+							for _, rb := range fb.ReportBlocks {
+								for _, mb := range rb.MetricBlocks {
+									fmt.Printf("mb.ECN: %v\n", mb.ECN)
+								}
+							}
+							// fmt.Println()
+							// cc.ReportBlocks[0].MetricBlocks[0].ECN
+							ecnCount++
+						}
+					}
+					fmt.Printf("%s ECN feedback packets received: %d\n", getTime(), ecnCount)
+				}
+			} else {
+				fmt.Println("oh oh ", rtcpErr)
 			}
 		}
 	}()
@@ -213,7 +253,8 @@ func handle_video(ss *sessionSetup) {
 		<-ss.iceConnectedCtx.Done()
 
 		println("herere")
-		duration := time.Millisecond * time.Duration(1000/30)
+		// duration := time.Millisecond * time.Duration(1000/30)
+		duration := time.Millisecond * time.Duration(1000/0.2)
 		ticker := time.NewTicker(duration)
 
 		var fcnt int = 0
@@ -224,7 +265,13 @@ func handle_video(ss *sessionSetup) {
 
 			targetBitrate := (*estimator).GetTargetBitrate()
 			fmt.Println("target bitrate is ", targetBitrate)
-			frame := fsCtx.GetNextFrame()
+			// frame := fsCtx.GetNextFrame()
+			l := 26 * 2
+			frame := make([]byte, l)
+
+			for i := 0; i < l; i++ {
+				frame[i] = byte('A' + i%26)
+			}
 
 			if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
 				panic(err)

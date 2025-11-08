@@ -6,6 +6,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/h265writer"
@@ -37,11 +40,23 @@ func main() {
 	answerAddr := flag.String("answer-address", ":60000", "Address that the Answer HTTP server is hosted on.")
 	flag.Parse()
 
-	var candidatesMux sync.Mutex
-	pendingCandidates := make([]*webrtc.ICECandidate, 0)
-	// Everything below is the Pion WebRTC API! Thanks for using it ❤️.
+	var err error
+	interceptorRegistry := &interceptor.Registry{}
+	mediaEngine := &webrtc.MediaEngine{}
+	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
+		panic(err)
+	}
 
-	// Prepare the configuration
+	webrtc.ConfigureCongestionControlFeedback(mediaEngine, interceptorRegistry)
+
+	// if err = webrtc.ConfigureTWCCHeaderExtensionSender(mediaEngine, interceptorRegistry); err != nil {
+	// 	panic(err)
+	// }
+
+	if err = webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
+		panic(err)
+	}
+
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -50,16 +65,21 @@ func main() {
 		},
 	}
 
-	// Create a new RTCPeerConnection
-	peerConnection, err := webrtc.NewPeerConnection(config)
+	peerConnection, err := webrtc.NewAPI(
+		webrtc.WithInterceptorRegistry(interceptorRegistry), webrtc.WithMediaEngine(mediaEngine),
+	).NewPeerConnection(config)
 	if err != nil {
 		panic(err)
 	}
+
 	defer func() {
 		if err := peerConnection.Close(); err != nil {
 			fmt.Printf("cannot close peerConnection: %v\n", err)
 		}
 	}()
+
+	var candidatesMux sync.Mutex
+	pendingCandidates := make([]*webrtc.ICECandidate, 0)
 
 	// When an ICE candidate is available send to the other Pion instance
 	// the other Pion instance will add this candidate by calling AddICECandidate
@@ -67,6 +87,9 @@ func main() {
 		if candidate == nil {
 			return
 		}
+
+		jj, _ := json.Marshal(candidate)
+		println("Signalling ICE candidate ", string(jj))
 
 		candidatesMux.Lock()
 		defer candidatesMux.Unlock()
@@ -87,6 +110,7 @@ func main() {
 		if candidateErr != nil {
 			panic(candidateErr)
 		}
+		println("Received candidate: ", string(candidate))
 		if candidateErr := peerConnection.AddICECandidate(
 			webrtc.ICECandidateInit{Candidate: string(candidate)},
 		); candidateErr != nil {
@@ -100,27 +124,8 @@ func main() {
 		if err := json.NewDecoder(req.Body).Decode(&sdp); err != nil {
 			panic(err)
 		}
-		// // Print the decoded SessionDescription and the raw SDP string so you can inspect them.
-		// if b, err := json.MarshalIndent(sdp, "", "  "); err == nil {
-		// 	fmt.Println("Decoded SDP (JSON):")
-		// 	fmt.Println(string(b))
 
-		// } else {
-		// 	fmt.Printf("failed to marshal sdp: %v\n", err)
-		// }
-
-		// {
-		// 	file, err := os.Create("r.sdp")
-		// 	if err != nil {
-		// 		panic(err)
-		// 	}
-		// 	defer file.Close() // ensures the file is closed when the function exits
-
-		// 	_, err = file.WriteString(sdp.SDP)
-		// 	if err != nil {
-		// 		panic(err)
-		// 	}
-		// }
+		println(sdp.SDP)
 
 		if err := peerConnection.SetRemoteDescription(sdp); err != nil {
 			panic(err)
@@ -216,16 +221,20 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 	}()
 
 	for {
-		rtpPacket, _, err := track.ReadRTP()
+		p, _, err := track.ReadRTP()
 
 		// println("received rtp packet", rtpPacket.SequenceNumber, len(rtpPacket.Payload))
 
 		if err != nil {
-			fmt.Println(err)
+			fmt.Println(" error ", err)
 			return
 		}
 
-		if err := writer.WriteRTP(rtpPacket); err != nil {
+		hash := sha256.Sum256(p.Payload)
+		hashStr := base64.StdEncoding.EncodeToString(hash[:])
+		println("Received RTP Packet  ", p.SequenceNumber, " with hash ", hashStr)
+
+		if err := writer.WriteRTP(p); err != nil {
 			fmt.Println(err)
 			return
 		}
