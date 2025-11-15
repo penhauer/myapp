@@ -13,8 +13,8 @@ import (
 func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 	payload := []byte(candidate.ToJSON().Candidate)
 
-	x, _ := json.Marshal(candidate.ToJSON())
-	println(getTime(), "signalling candidate ", string(x))
+	// x, _ := json.Marshal(candidate.ToJSON())
+	// println(getTime(), "signalling candidate ", string(x))
 
 	resp, err := http.Post( //nolint:noctx
 		fmt.Sprintf("http://%s/candidate", addr),
@@ -37,7 +37,7 @@ func setupCandidateHandler(ss *sessionSetup) {
 		if candidateErr != nil {
 			panic(candidateErr)
 		}
-		println("Received candidate", string(candidate))
+		// println("Received candidate", string(candidate))
 		if candidateErr := ss.peerConnection.AddICECandidate(
 			webrtc.ICECandidateInit{Candidate: string(candidate)},
 		); candidateErr != nil {
@@ -54,7 +54,7 @@ func setupSDPHandler(ss *sessionSetup) {
 			panic(sdpErr)
 		}
 
-		println(getTime(), "Receieved SDP ")
+		// println(getTime(), "Receieved SDP ")
 
 		if sdpErr := ss.peerConnection.SetRemoteDescription(sdp); sdpErr != nil {
 			panic(sdpErr)

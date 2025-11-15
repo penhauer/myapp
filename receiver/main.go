@@ -18,6 +18,7 @@ import (
 	"sync"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/pion/webrtc/v4/pkg/media/h265writer"
@@ -88,8 +89,8 @@ func main() {
 			return
 		}
 
-		jj, _ := json.Marshal(candidate)
-		println("Signalling ICE candidate ", string(jj))
+		// jj, _ := json.Marshal(candidate)
+		// println("Signalling ICE candidate ", string(jj))
 
 		candidatesMux.Lock()
 		defer candidatesMux.Unlock()
@@ -221,7 +222,7 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 	}()
 
 	for {
-		p, _, err := track.ReadRTP()
+		p, a, err := track.ReadRTP()
 
 		// println("received rtp packet", rtpPacket.SequenceNumber, len(rtpPacket.Payload))
 
@@ -232,7 +233,15 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 
 		hash := sha256.Sum256(p.Payload)
 		hashStr := base64.StdEncoding.EncodeToString(hash[:])
-		println("Received RTP Packet  ", p.SequenceNumber, " with hash ", hashStr)
+
+		var ecn rtcp.ECN
+		if e, hasECN := a["ECN"]; hasECN {
+			if ecnT, ok := e.(byte); ok {
+				ecn = rtcp.ECN(ecnT)
+			}
+		}
+
+		println("Received RTP Packet  ", p.SequenceNumber, " with hash ", hashStr, " ecn: ", ecn)
 
 		if err := writer.WriteRTP(p); err != nil {
 			fmt.Println(err)

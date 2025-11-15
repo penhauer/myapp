@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -14,7 +13,6 @@ import (
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
 	"github.com/pion/rtcp"
-	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 
@@ -76,8 +74,8 @@ func setupICECandidateHandler(ss *sessionSetup) {
 			return
 		}
 
-		jj, _ := json.Marshal(candidate)
-		println("Signalling ICE candidate ", string(jj))
+		// jj, _ := json.Marshal(candidate)
+		// println("Signalling ICE candidate ", string(jj))
 
 		ss.candidatesMux.Lock()
 		defer ss.candidatesMux.Unlock()
@@ -207,39 +205,37 @@ func handle_video(ss *sessionSetup) {
 	// like NACK this needs to be called.
 	go func() {
 		rtcpBuf := make([]byte, 1500)
-		rtcpPacketBuff := &rtp.PacketBuffer{
-			Payload: rtcpBuf,
-		}
 		for {
-			if _, rtcpErr := rtpSender.Read(rtcpPacketBuff); rtcpErr == nil {
+			if n, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr == nil {
 				fmt.Println("RTCP packet received")
 
 				// func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
 
 				f := &rtcp.CCFeedbackReport{}
-				err := f.Unmarshal(rtcpPacketBuff.GetReadBuffer())
+				err := f.Unmarshal(rtcpBuf[:n])
 				if err != nil {
 					fmt.Println("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
 				}
 
-				pkts, uErr := rtcp.Unmarshal(rtcpPacketBuff.GetReadBuffer())
+				pkts, uErr := rtcp.Unmarshal(rtcpBuf[:n])
 				if uErr != nil {
 					fmt.Println("failed to unmarshal RTCP packets:", uErr)
 				} else {
-					ecnCount := 0
 					for _, p := range pkts {
 						if fb, ok := p.(*rtcp.CCFeedbackReport); ok {
-							for _, rb := range fb.ReportBlocks {
-								for _, mb := range rb.MetricBlocks {
-									fmt.Printf("mb.ECN: %v\n", mb.ECN)
-								}
-							}
-							// fmt.Println()
-							// cc.ReportBlocks[0].MetricBlocks[0].ECN
-							ecnCount++
+							fmt.Printf("Feedback: %v\n", fb)
+							// for _, rb := range fb.ReportBlocks {
+
+							// 	rb.BeginSequence
+							// 	for _, mb := range rb.MetricBlocks {
+							// 		fmt.Printf("mb.ECN: %v\n", mb.ECN)
+							// 	}
+							// }
+							// // fmt.Println()
+							// // cc.ReportBlocks[0].MetricBlocks[0].ECN
+							// ecnCount++
 						}
 					}
-					fmt.Printf("%s ECN feedback packets received: %d\n", getTime(), ecnCount)
 				}
 			} else {
 				fmt.Println("oh oh ", rtcpErr)
@@ -248,13 +244,13 @@ func handle_video(ss *sessionSetup) {
 	}()
 
 	estimator := <-ss.estimatorChan
+	_ = estimator
 
 	go func() {
 		<-ss.iceConnectedCtx.Done()
 
-		println("herere")
-		// duration := time.Millisecond * time.Duration(1000/30)
-		duration := time.Millisecond * time.Duration(1000/0.2)
+		duration := time.Millisecond * time.Duration(1000/30)
+		// duration := time.Millisecond * time.Duration(1000/0.2)
 		ticker := time.NewTicker(duration)
 
 		var fcnt int = 0
@@ -265,13 +261,13 @@ func handle_video(ss *sessionSetup) {
 
 			targetBitrate := (*estimator).GetTargetBitrate()
 			fmt.Println("target bitrate is ", targetBitrate)
-			// frame := fsCtx.GetNextFrame()
-			l := 26 * 2
-			frame := make([]byte, l)
+			frame := fsCtx.GetNextFrame()
+			// l := 26 * 2
+			// frame := make([]byte, l)
 
-			for i := 0; i < l; i++ {
-				frame[i] = byte('A' + i%26)
-			}
+			// for i := 0; i < l; i++ {
+			// 	frame[i] = byte('A' + i%26)
+			// }
 
 			if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
 				panic(err)
