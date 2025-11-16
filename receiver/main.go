@@ -6,16 +6,16 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
@@ -126,8 +126,6 @@ func main() {
 			panic(err)
 		}
 
-		println(sdp.SDP)
-
 		if err := peerConnection.SetRemoteDescription(sdp); err != nil {
 			panic(err)
 		}
@@ -221,18 +219,30 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 		}
 	}()
 
+	// create logger file with current date like 16_12_42 (day_hour_minute)
+	now := time.Now()
+	filename := fmt.Sprintf("frame_reception_%s.log", now.Format("02_15_04"))
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		// fallback to stderr if file can't be created
+		log.Printf("failed to open log file %s: %v", filename, err)
+	} else {
+		defer f.Close()
+	}
+	logger := log.New(f, "", log.LstdFlags)
+
+	frameCnt := 0
+
+	// print the start time
+	logger.Printf("Start reception at %s (log file: %s)", now.Format(time.StampMilli), filename)
+
 	for {
 		p, a, err := track.ReadRTP()
 
-		// println("received rtp packet", rtpPacket.SequenceNumber, len(rtpPacket.Payload))
-
 		if err != nil {
-			fmt.Println(" error ", err)
+			logger.Printf("error reading RTP: %v", err)
 			return
 		}
-
-		hash := sha256.Sum256(p.Payload)
-		hashStr := base64.StdEncoding.EncodeToString(hash[:])
 
 		var ecn rtcp.ECN
 		if e, hasECN := a["ECN"]; hasECN {
@@ -241,10 +251,16 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 			}
 		}
 
-		println("Received RTP Packet  ", p.SequenceNumber, " with hash ", hashStr, " ecn: ", ecn)
+		if p.Header.Marker {
+			frameCnt++
+			// print the time for reception of the frame
+			logger.Printf("Frame %d received marker at %s", frameCnt, time.Now().Format(time.StampMicro))
+		}
+		fmt.Printf("Received RTP Packet seq=%d marker=%t ecn=%v marked_count=%d\n",
+			p.SequenceNumber, p.Header.Marker, ecn, frameCnt)
 
 		if err := writer.WriteRTP(p); err != nil {
-			fmt.Println(err)
+			logger.Printf("error writing RTP to file: %v", err)
 			return
 		}
 

@@ -97,9 +97,9 @@ func main() {
 
 	ss.offerAddr = flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
 	ss.answerAddr = flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
-	videoFileName = *flag.String("video", "./input.y4m", "video path")
-	print(videoFileName)
+	videoPathPtr := flag.String("video", "./input.y4m", "video path")
 	flag.Parse()
+	videoFileName = *videoPathPtr
 
 	ss.pendingCandidates = make([]*webrtc.ICECandidate, 0)
 	ss.iceConnectedCtx, ss.iceConnectedCtxCancel = context.WithCancel(context.Background())
@@ -168,7 +168,6 @@ func setupPeerConnection() (chan *cc.BandwidthEstimator, *webrtc.PeerConnection)
 }
 
 func handle_video(ss *sessionSetup) {
-	videoFileName = "/home/amirmo/testbed/video/webRTC/video_generator/video_files/4.y4m"
 	_, err := os.Stat(videoFileName)
 	haveVideoFile := !os.IsNotExist(err)
 
@@ -176,14 +175,19 @@ func handle_video(ss *sessionSetup) {
 		panic("Could not find `" + videoFileName + "`")
 	}
 
-	tCtx := transcoder.NewTranscodingCtx(
-		2560, 1440,
-		"hevc_nvenc",
-		videoFileName,
-		false,
-	)
+	framRate := 30
+	ctx := &transcoder.Config{
+		Codec:            "hevc_nvenc",
+		TargetW:          3840,
+		TargetH:          2160,
+		InputFile:        videoFileName,
+		LoopVideo:        true,
+		InitialBitrate:   9_500_000,
+		EncoderFrameRate: framRate, // whether we send the frames with this frame rate is another not a business of encoder
+	}
+
 	fsCtx := &transcoder.FrameServingContext{}
-	fsCtx.Init(tCtx)
+	fsCtx.Init(ctx)
 
 	trackCodec := webrtc.MimeTypeH265
 
@@ -204,74 +208,65 @@ func handle_video(ss *sessionSetup) {
 	// Before these packets are returned they are processed by interceptors. For things
 	// like NACK this needs to be called.
 	go func() {
-		rtcpBuf := make([]byte, 1500)
-		for {
-			if n, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr == nil {
-				fmt.Println("RTCP packet received")
-
-				// func (b *CCFeedbackReport) Unmarshal(rawPacket []byte) error {
-
-				f := &rtcp.CCFeedbackReport{}
-				err := f.Unmarshal(rtcpBuf[:n])
-				if err != nil {
-					fmt.Println("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
-				}
-
-				pkts, uErr := rtcp.Unmarshal(rtcpBuf[:n])
-				if uErr != nil {
-					fmt.Println("failed to unmarshal RTCP packets:", uErr)
-				} else {
-					for _, p := range pkts {
-						if fb, ok := p.(*rtcp.CCFeedbackReport); ok {
-							fmt.Printf("Feedback: %v\n", fb)
-							// for _, rb := range fb.ReportBlocks {
-
-							// 	rb.BeginSequence
-							// 	for _, mb := range rb.MetricBlocks {
-							// 		fmt.Printf("mb.ECN: %v\n", mb.ECN)
-							// 	}
-							// }
-							// // fmt.Println()
-							// // cc.ReportBlocks[0].MetricBlocks[0].ECN
-							// ecnCount++
-						}
-					}
-				}
-			} else {
-				fmt.Println("oh oh ", rtcpErr)
-			}
-		}
+		readRTCP(rtpSender)
 	}()
 
 	estimator := <-ss.estimatorChan
-	_ = estimator
 
 	go func() {
 		<-ss.iceConnectedCtx.Done()
 
-		duration := time.Millisecond * time.Duration(1000/30)
-		// duration := time.Millisecond * time.Duration(1000/0.2)
+		duration := time.Millisecond * time.Duration(1000/framRate)
 		ticker := time.NewTicker(duration)
-
-		var fcnt int = 0
 		defer ticker.Stop()
-		for ; true; <-ticker.C {
 
-			fcnt += 1
+		start := time.Now()
+		var fcnt int
+
+		for range ticker.C {
+			fcnt++
 
 			targetBitrate := (*estimator).GetTargetBitrate()
-			fmt.Println("target bitrate is ", targetBitrate)
 			frame := fsCtx.GetNextFrame()
-			// l := 26 * 2
-			// frame := make([]byte, l)
+			if len(frame) == 0 {
+				continue
+			}
 
-			// for i := 0; i < l; i++ {
-			// 	frame[i] = byte('A' + i%26)
-			// }
-
+			elapsed := time.Since(start)
+			fmt.Printf("%s elapsed=%v target bitrate=%d fcnt=%d\n", getTime(), elapsed, targetBitrate, fcnt)
 			if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
 				panic(err)
 			}
 		}
 	}()
+}
+
+func readRTCP(rtpSender *webrtc.RTPSender) {
+	rtcpBuf := make([]byte, 1500)
+	for {
+		n, _, rtcpErr := rtpSender.Read(rtcpBuf)
+		continue
+		if rtcpErr == nil {
+			// keep a visible log for received RTCP packets
+			fmt.Println("RTCP packet received")
+
+			f := &rtcp.CCFeedbackReport{}
+			if err := f.Unmarshal(rtcpBuf[:n]); err != nil {
+				fmt.Println("failed to unmarshal CCFeedbackReport:", err)
+			}
+
+			pkts, uErr := rtcp.Unmarshal(rtcpBuf[:n])
+			if uErr != nil {
+				fmt.Println("failed to unmarshal RTCP packets:", uErr)
+			} else {
+				for _, p := range pkts {
+					if fb, ok := p.(*rtcp.CCFeedbackReport); ok {
+						fmt.Printf("Feedback: %v\n", fb)
+					}
+				}
+			}
+		} else {
+			fmt.Println("oh oh ", rtcpErr)
+		}
+	}
 }

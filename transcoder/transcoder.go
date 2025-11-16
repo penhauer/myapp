@@ -36,14 +36,23 @@ import (
 )
 
 type transcodingCtx struct {
-	// Codec
-	Codec string
 
-	// input
-	InputFile string
+	// Conig
+	config *Config
+	//params
+	srcW int
+	srcH int
+	// targetW int
+	// targetH int
+	// // Codec
+	// Codec          string
+	// initialBitrate int
+	// // input
+	// InputFile string
+	// loopVideo bool
+
 	// todo: remove later
-	f         *os.File
-	loopVideo bool
+	f *os.File
 
 	// decoding
 	decFmt    *FormatContext
@@ -72,22 +81,16 @@ type transcodingCtx struct {
 
 	// hw
 	hwframeCtx *C.AVBufferRef
-
-	//params
-	srcW int
-	srcH int
-	dstW int
-	dstH int
 }
 
-func NewTranscodingCtx(srcW, srcH int, codec, inputFile string, loopVideo bool) *transcodingCtx {
-	return &transcodingCtx{
-		srcW:      srcW,
-		srcH:      srcH,
-		Codec:     codec,
-		InputFile: inputFile,
-		loopVideo: loopVideo,
-	}
+type Config struct {
+	Codec            string
+	TargetW          int
+	TargetH          int
+	InputFile        string
+	InitialBitrate   int
+	LoopVideo        bool
+	EncoderFrameRate int
 }
 
 func setupDecoder(ctx *transcodingCtx) error {
@@ -100,7 +103,7 @@ func setupDecoder(ctx *transcodingCtx) error {
 	options := NewDictionary()
 	defer options.Free()
 
-	if err := ctx.decFmt.OpenInput(ctx.InputFile, nil, options); err != nil {
+	if err := ctx.decFmt.OpenInput(ctx.config.InputFile, nil, options); err != nil {
 		return fmt.Errorf("failed to open input file: %v", err)
 	}
 
@@ -108,7 +111,7 @@ func setupDecoder(ctx *transcodingCtx) error {
 		return fmt.Errorf("could not find stream info: %v", err)
 	}
 
-	ctx.decFmt.Dump(0, ctx.InputFile, false)
+	ctx.decFmt.Dump(0, ctx.config.InputFile, false)
 	ctx.decStream = ctx.decFmt.Streams()[0]
 
 	codecID := int(ctx.decStream.CAVStream.codecpar.codec_id)
@@ -148,17 +151,17 @@ func setupDecoder(ctx *transcodingCtx) error {
 func setupEncoder(ctx *transcodingCtx) error {
 	var err error
 
-	codec := FindEncoderByName(ctx.Codec)
+	codec := FindEncoderByName(ctx.config.Codec)
 	if codec == nil {
-		log.Fatalf("Could not find encoder %s", ctx.Codec)
+		log.Fatalf("Could not find encoder %s", ctx.config.Codec)
 		return fmt.Errorf("encoder not found")
 	}
 
 	// --- 2) Build options (NVENC-friendly; drop libvpx ones)
 	params := map[string]string{
-		"bitrate":   "2500000", // ~1.5 Mbps
-		"width":     "2560",
-		"height":    "1440",
+		"bitrate":   strconv.Itoa(ctx.config.InitialBitrate),
+		"width":     strconv.Itoa(ctx.config.TargetW),
+		"height":    strconv.Itoa(ctx.config.TargetH),
 		"framerate": "60",
 		"gop_size":  "30",
 
@@ -360,7 +363,7 @@ func decodeStream(ctx *transcodingCtx) bool {
 }
 
 func (ctx *transcodingCtx) handleReadingStopped() bool {
-	if !ctx.loopVideo {
+	if !ctx.config.LoopVideo {
 		close(ctx.frameChan)
 		return false
 	}
@@ -502,7 +505,11 @@ func (fsCtx *FrameServingContext) startDecoding() {
 	}
 }
 
-func (fsCtx *FrameServingContext) Init(tctx *transcodingCtx) {
+func (fsCtx *FrameServingContext) Init(ctx *Config) {
+	tctx := &transcodingCtx{
+		config: ctx,
+	}
+
 	fsCtx.transcodingCtx = tctx
 
 	fsCtx.transcodingCtx.f, _ = os.Create("raw.x265")
