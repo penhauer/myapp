@@ -95,7 +95,7 @@ var videoFileName string
 func main() {
 	ss := &sessionSetup{}
 
-	ss.offerAddr = flag.String("offer-address", ":50000", "Address that the Offer HTTP server is hosted on.")
+	ss.offerAddr = flag.String("offer-address", "0.0.0.0:50000", "Address that the Offer HTTP server is hosted on.")
 	ss.answerAddr = flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
 	videoPathPtr := flag.String("video", "./input.y4m", "video path")
 	flag.Parse()

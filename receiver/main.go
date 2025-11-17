@@ -38,7 +38,7 @@ func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 // nolint:gocognit, cyclop
 func main() {
 	offerAddr := flag.String("offer-address", "localhost:50000", "Address that the Offer HTTP server is hosted on.")
-	answerAddr := flag.String("answer-address", ":60000", "Address that the Answer HTTP server is hosted on.")
+	answerAddr := flag.String("answer-address", "0.0.0.0:60000", "Address that the Answer HTTP server is hosted on.")
 	flag.Parse()
 
 	var err error
@@ -212,6 +212,15 @@ func handle_video(peerConnection *webrtc.PeerConnection) {
 
 }
 
+func getExperimentDirEnvVar() string {
+	dir := os.Getenv("EXPERIMENT_DIR")
+	if dir == "" {
+		dir = "."
+		// log.Fatalf("required environment variable EXPERIMENT_DIR is not set")
+	}
+	return dir
+}
+
 func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 	defer func() {
 		if err := writer.Close(); err != nil {
@@ -221,8 +230,9 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 
 	// create logger file with current date like 16_12_42 (day_hour_minute)
 	now := time.Now()
-	filename := fmt.Sprintf("frame_reception_%s.log", now.Format("02_15_04"))
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	experimentDir := getExperimentDirEnvVar()
+	filename := fmt.Sprintf("%s/frame_reception.log", experimentDir)
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		// fallback to stderr if file can't be created
 		log.Printf("failed to open log file %s: %v", filename, err)
