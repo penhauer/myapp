@@ -98,6 +98,7 @@ func main() {
 	ss.offerAddr = flag.String("offer-address", "0.0.0.0:50000", "Address that the Offer HTTP server is hosted on.")
 	ss.answerAddr = flag.String("answer-address", "127.0.0.1:60000", "Address that the Answer HTTP server is hosted on.")
 	videoPathPtr := flag.String("video", "./input.y4m", "video path")
+	durationPtr := flag.Int("duration", 0, "streaming duration in seconds (0 = infinite)")
 	flag.Parse()
 	videoFileName = *videoPathPtr
 
@@ -114,7 +115,7 @@ func main() {
 	setupCandidateHandler(ss)
 	setupSDPHandler(ss)
 	go func() { panic(http.ListenAndServe(*ss.offerAddr, nil)) }()
-	handle_video(ss)
+	handle_video(ss, *durationPtr)
 	setupConnectionStateHandler(ss)
 	sendOffer(ss)
 	select {}
@@ -167,7 +168,15 @@ func setupPeerConnection() (chan *cc.BandwidthEstimator, *webrtc.PeerConnection)
 	return estimatorChan, peerConnection
 }
 
-func handle_video(ss *sessionSetup) {
+func getExperimentDirEnvVar() string {
+	dir := os.Getenv("EXPERIMENT_DIR")
+	if dir == "" {
+		fmt.Println("ERROR required environment variable EXPERIMENT_DIR is not set")
+	}
+	return dir
+}
+
+func handle_video(ss *sessionSetup, durationSec int) {
 	_, err := os.Stat(videoFileName)
 	haveVideoFile := !os.IsNotExist(err)
 
@@ -175,6 +184,7 @@ func handle_video(ss *sessionSetup) {
 		panic("Could not find `" + videoFileName + "`")
 	}
 
+	experimentDir := getExperimentDirEnvVar()
 	framRate := 30
 	ctx := &transcoder.Config{
 		Codec:            "hevc_nvenc",
@@ -182,8 +192,10 @@ func handle_video(ss *sessionSetup) {
 		TargetH:          2160,
 		InputFile:        videoFileName,
 		LoopVideo:        true,
-		InitialBitrate:   9_500_000,
+		InitialBitrate:   1_500_000,
 		EncoderFrameRate: framRate, // whether we send the frames with this frame rate is another not a business of encoder
+		OutputPath:       experimentDir + "/raw.x265",
+		RawOutputPath:    experimentDir + "/output.mp4",
 	}
 
 	fsCtx := &transcoder.FrameServingContext{}
@@ -223,19 +235,30 @@ func handle_video(ss *sessionSetup) {
 		start := time.Now()
 		var fcnt int
 
-		for range ticker.C {
-			fcnt++
+		var done <-chan time.Time
+		if durationSec > 0 {
+			done = time.After(time.Duration(durationSec) * time.Second)
+		}
 
-			targetBitrate := (*estimator).GetTargetBitrate()
-			frame := fsCtx.GetNextFrame()
-			if len(frame) == 0 {
-				continue
-			}
+		for {
+			select {
+			case <-ticker.C:
+				fcnt++
 
-			elapsed := time.Since(start)
-			fmt.Printf("%s elapsed=%v target bitrate=%d fcnt=%d\n", getTime(), elapsed, targetBitrate, fcnt)
-			if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
-				panic(err)
+				targetBitrate := (*estimator).GetTargetBitrate()
+				frame := fsCtx.GetNextFrame()
+				if len(frame) == 0 {
+					continue
+				}
+
+				elapsed := time.Since(start)
+				fmt.Printf("%s elapsed=%v target bitrate=%d fcnt=%d\n", getTime(), elapsed, targetBitrate, fcnt)
+				if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
+					panic(err)
+				}
+			case <-done:
+				fmt.Printf("%s streaming duration of %d seconds reached, exiting\n", getTime(), durationSec)
+				os.Exit(0)
 			}
 		}
 	}()

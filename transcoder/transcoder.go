@@ -39,20 +39,13 @@ type transcodingCtx struct {
 
 	// Conig
 	config *Config
+
 	//params
 	srcW int
 	srcH int
-	// targetW int
-	// targetH int
-	// // Codec
-	// Codec          string
-	// initialBitrate int
-	// // input
-	// InputFile string
-	// loopVideo bool
 
 	// todo: remove later
-	f *os.File
+	rawOutputFile *os.File
 
 	// decoding
 	decFmt    *FormatContext
@@ -91,6 +84,8 @@ type Config struct {
 	InitialBitrate   int
 	LoopVideo        bool
 	EncoderFrameRate int
+	OutputPath       string
+	RawOutputPath    string
 }
 
 func setupDecoder(ctx *transcodingCtx) error {
@@ -254,10 +249,10 @@ func setupEncoder(ctx *transcodingCtx) error {
 
 	// --- 7) Muxer: IVF with AV1 (works fine)
 	ctx.encFmt = &FormatContext{}
-	if C.avformat_alloc_output_context2(&ctx.encFmt.CAVFormatContext, nil, C.CString("mp4"), C.CString("output.mp4")) < 0 {
+	if C.avformat_alloc_output_context2(&ctx.encFmt.CAVFormatContext, nil, C.CString("mp4"), C.CString(ctx.config.OutputPath)) < 0 {
 		return fmt.Errorf("alloc_output_context2 failed")
 	}
-	if C.avio_open(&ctx.encFmt.CAVFormatContext.pb, C.CString("output.mp4"), C.AVIO_FLAG_WRITE) < 0 {
+	if C.avio_open(&ctx.encFmt.CAVFormatContext.pb, C.CString(ctx.config.OutputPath), C.AVIO_FLAG_WRITE) < 0 {
 		return fmt.Errorf("avio_open failed")
 	}
 
@@ -272,7 +267,7 @@ func setupEncoder(ctx *transcodingCtx) error {
 	ctx.encStream.TimeBase().SetNumerator(ctx.encCodec.TimeBase().Numerator())
 	ctx.encStream.SetAverageFrameRate(ctx.encCodec.FrameRate())
 
-	C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString("output.mp4"), 1)
+	C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString(ctx.config.OutputPath), 1)
 
 	if C.avformat_write_header(ctx.encFmt.CAVFormatContext, nil) < 0 {
 		return fmt.Errorf("avformat_write_header failed")
@@ -442,7 +437,7 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 
 	if !ok {
 		// todo: remove later
-		ctx.f.Close()
+		ctx.rawOutputFile.Close()
 
 		C.av_write_trailer(ctx.encFmt.CAVFormatContext)
 
@@ -512,7 +507,7 @@ func (fsCtx *FrameServingContext) Init(ctx *Config) {
 
 	fsCtx.transcodingCtx = tctx
 
-	fsCtx.transcodingCtx.f, _ = os.Create("raw.x265")
+	fsCtx.transcodingCtx.rawOutputFile, _ = os.Create(ctx.RawOutputPath)
 
 	fsCtx.bufferGap = 10
 	if err := setup(fsCtx.transcodingCtx); err != nil {
