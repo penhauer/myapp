@@ -171,6 +171,7 @@ func setupPeerConnection() (chan *cc.BandwidthEstimator, *webrtc.PeerConnection)
 func getExperimentDirEnvVar() string {
 	dir := os.Getenv("EXPERIMENT_DIR")
 	if dir == "" {
+		dir = "."
 		fmt.Println("ERROR required environment variable EXPERIMENT_DIR is not set")
 	}
 	return dir
@@ -184,8 +185,16 @@ func handle_video(ss *sessionSetup, durationSec int) {
 		panic("Could not find `" + videoFileName + "`")
 	}
 
+	estimator := <-ss.estimatorChan
+
+	keyFrameCallback := func() int {
+		bitrate := (*estimator).GetTargetBitrate()
+		fmt.Printf("Encoder's bitrate set to %v at %v\n", bitrate, time.Now())
+		return bitrate
+	}
+
 	experimentDir := getExperimentDirEnvVar()
-	framRate := 30
+	frameRate := 30
 	ctx := &transcoder.Config{
 		Codec:            "hevc_nvenc",
 		TargetW:          3840,
@@ -193,7 +202,9 @@ func handle_video(ss *sessionSetup, durationSec int) {
 		InputFile:        videoFileName,
 		LoopVideo:        true,
 		InitialBitrate:   1_500_000,
-		EncoderFrameRate: framRate, // whether we send the frames with this frame rate is another not a business of encoder
+		GoPSize:          30,
+		EncoderFrameRate: frameRate, // whether we send the frames with this frame rate is another not a business of encoder
+		KeyFrameCallback: keyFrameCallback,
 		OutputPath:       experimentDir + "/raw.x265",
 		RawOutputPath:    experimentDir + "/output.mp4",
 	}
@@ -223,12 +234,10 @@ func handle_video(ss *sessionSetup, durationSec int) {
 		readRTCP(rtpSender)
 	}()
 
-	estimator := <-ss.estimatorChan
-
 	go func() {
 		<-ss.iceConnectedCtx.Done()
 
-		duration := time.Millisecond * time.Duration(1000/framRate)
+		duration := time.Millisecond * time.Duration(1000/frameRate)
 		ticker := time.NewTicker(duration)
 		defer ticker.Stop()
 

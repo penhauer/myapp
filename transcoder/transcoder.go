@@ -31,9 +31,22 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 	"unsafe"
 )
+
+type Config struct {
+	Codec            string
+	TargetW          int
+	TargetH          int
+	InputFile        string
+	InitialBitrate   int
+	KeyFrameCallback func() int
+	GoPSize          int
+	LoopVideo        bool
+	EncoderFrameRate int
+	OutputPath       string
+	RawOutputPath    string
+}
 
 type transcodingCtx struct {
 
@@ -65,8 +78,9 @@ type transcodingCtx struct {
 	sinkFilter *FilterContext
 
 	// frames
-	frameChan chan *Frame
-	frameCnt  int
+	frameChan    chan *Frame
+	frameCnt     int
+	nextKeyFrame int
 
 	//sws
 	swsCtx *C.struct_SwsContext
@@ -74,18 +88,6 @@ type transcodingCtx struct {
 
 	// hw
 	hwframeCtx *C.AVBufferRef
-}
-
-type Config struct {
-	Codec            string
-	TargetW          int
-	TargetH          int
-	InputFile        string
-	InitialBitrate   int
-	LoopVideo        bool
-	EncoderFrameRate int
-	OutputPath       string
-	RawOutputPath    string
 }
 
 func setupDecoder(ctx *transcodingCtx) error {
@@ -154,12 +156,6 @@ func setupEncoder(ctx *transcodingCtx) error {
 
 	// --- 2) Build options (NVENC-friendly; drop libvpx ones)
 	params := map[string]string{
-		"bitrate":   strconv.Itoa(ctx.config.InitialBitrate),
-		"width":     strconv.Itoa(ctx.config.TargetW),
-		"height":    strconv.Itoa(ctx.config.TargetH),
-		"framerate": "60",
-		"gop_size":  "30",
-
 		// NVENC options
 		"preset":         "p5",  // p1..p7 (p5 good balance)
 		"tune":           "ull", // ultra-low-latency
@@ -208,28 +204,15 @@ func setupEncoder(ctx *transcodingCtx) error {
 		C.SWS_BILINEAR, nil, nil, nil)
 
 	// --- 5) Basic fields / time base / fps
-	// NOTE: feed NV12 frames (or convert prior to SendFrame)
-	w, _ := strconv.Atoi(params["width"])
-	h, _ := strconv.Atoi(params["height"])
-	fps, _ := strconv.Atoi(params["framerate"])
-
-	ctx.encCodec.CAVCodecContext.width = C.int(w)
-	ctx.encCodec.CAVCodecContext.height = C.int(h)
-
-	ctx.encCodec.SetTimeBase(NewRational(1, fps))
-	ctx.encCodec.SetFrameRate(NewRational(fps, 1))
+	ctx.encCodec.CAVCodecContext.width = C.int(ctx.config.TargetW)
+	ctx.encCodec.CAVCodecContext.height = C.int(ctx.config.TargetH)
+	ctx.encCodec.SetTimeBase(NewRational(1, ctx.config.EncoderFrameRate))
+	ctx.encCodec.SetFrameRate(NewRational(ctx.config.EncoderFrameRate, 1))
 
 	// Low-latency: no B-frames
 	ctx.encCodec.CAVCodecContext.max_b_frames = 0
-
-	// GOP
-	g, _ := strconv.Atoi(params["gop_size"])
-	ctx.encCodec.CAVCodecContext.gop_size = C.int(g)
-
-	// Bitrate
-	br, _ := strconv.Atoi(params["bitrate"])
-	ctx.encCodec.CAVCodecContext.bit_rate = C.long(br)
-
+	ctx.encCodec.CAVCodecContext.gop_size = C.int(ctx.config.GoPSize)
+	ctx.encCodec.CAVCodecContext.bit_rate = C.long(ctx.config.InitialBitrate)
 	ctx.encCodec.CAVCodecContext.pix_fmt = C.AV_PIX_FMT_CUDA
 
 	// --- 6) Apply encoder options
@@ -389,6 +372,11 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 	}
 	ctx.frameCnt += 1
 
+	if ctx.frameCnt == ctx.nextKeyFrame {
+		bitrate := ctx.config.KeyFrameCallback()
+		ctx.encCodec.CAVCodecContext.bit_rate = C.long(bitrate)
+	}
+
 	err = ctx.encCodec.FeedFrame(frame)
 	if err != nil {
 		err = fmt.Errorf("error in feedframe %v", err)
@@ -413,6 +401,12 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 			ctx.encPkt.RescaleTime(ctx.encCodec.TimeBase(), ctx.encStream.TimeBase())
 
 			frameBytes := getPacketBytes(ctx.encPkt)
+
+			if (ctx.encPkt.CAVPacket.flags & C.AV_PKT_FLAG_KEY) != 0 {
+				// this encoded packet is keyframe
+				fmt.Println("frame ", ctx.frameCnt, " is a keyframe")
+				ctx.nextKeyFrame = ctx.frameCnt + ctx.config.GoPSize
+			}
 
 			// todo: remove later
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
