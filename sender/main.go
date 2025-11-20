@@ -185,13 +185,15 @@ func handle_video(ss *sessionSetup, durationSec int) {
 		panic("Could not find `" + videoFileName + "`")
 	}
 
+	initialBitrate := 2_500_000
 	estimator := <-ss.estimatorChan
-
 	keyFrameCallback := func() int {
-		bitrate := (*estimator).GetTargetBitrate()
-		fmt.Printf("Encoder's bitrate set to %v at %v\n", bitrate, time.Now())
-		return bitrate
+		// bitrate := (*estimator).GetTargetBitrate()
+		// fmt.Printf("Encoder's bitrate set to %v at %v\n", bitrate, time.Now())
+		// return bitrate
+		return initialBitrate
 	}
+	// keyFrameCallback = nil
 
 	experimentDir := getExperimentDirEnvVar()
 	frameRate := 30
@@ -201,7 +203,7 @@ func handle_video(ss *sessionSetup, durationSec int) {
 		TargetH:          2160,
 		InputFile:        videoFileName,
 		LoopVideo:        true,
-		InitialBitrate:   1_500_000,
+		InitialBitrate:   initialBitrate,
 		GoPSize:          30,
 		EncoderFrameRate: frameRate, // whether we send the frames with this frame rate is another not a business of encoder
 		KeyFrameCallback: keyFrameCallback,
@@ -243,8 +245,9 @@ func handle_video(ss *sessionSetup, durationSec int) {
 
 		start := time.Now()
 		var fcnt int
-
 		var done <-chan time.Time
+		var sizeSum int = 0
+		var lastSetBitrate int = 1
 		if durationSec > 0 {
 			done = time.After(time.Duration(durationSec) * time.Second)
 		}
@@ -256,13 +259,29 @@ func handle_video(ss *sessionSetup, durationSec int) {
 
 				targetBitrate := (*estimator).GetTargetBitrate()
 				frame := fsCtx.GetNextFrame()
-				if len(frame) == 0 {
+
+				sizeSum += len(frame.Data)
+				if frame.KeyFrame {
+					diff := 100.0 * (sizeSum*8.0 - lastSetBitrate) / lastSetBitrate
+					fmt.Printf("Keyframe seen. sizeSumBits=%d lastSetBitrate=%d diff=%v\n", sizeSum*8, lastSetBitrate, diff)
+					lastSetBitrate = frame.Bitrate
+					sizeSum = 0
+				}
+
+				if len(frame.Data) == 0 {
 					continue
 				}
 
 				elapsed := time.Since(start)
-				fmt.Printf("%s elapsed=%v target bitrate=%d fcnt=%d\n", getTime(), elapsed, targetBitrate, fcnt)
-				if err := videoTrack.WriteSample(media.Sample{Data: frame, Duration: 24 * time.Millisecond}); err != nil {
+				fmt.Printf("%s elapsed=%v target bitrate=%d frame_bitrate= %d frame_size_bits=%d fcnt=%d \n",
+					getTime(),
+					elapsed,
+					targetBitrate,
+					frame.Bitrate,
+					len(frame.Data)*8,
+					fcnt,
+				)
+				if err := videoTrack.WriteSample(media.Sample{Data: frame.Data, Duration: duration}); err != nil {
 					panic(err)
 				}
 			case <-done:

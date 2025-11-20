@@ -27,12 +27,15 @@ import (
 	"C"
 )
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
 	"unsafe"
 )
+
+type KeyFrameCallbackType func() int
+
+var LOOKAHEAD = 2
 
 type Config struct {
 	Codec            string
@@ -40,12 +43,18 @@ type Config struct {
 	TargetH          int
 	InputFile        string
 	InitialBitrate   int
-	KeyFrameCallback func() int
+	KeyFrameCallback KeyFrameCallbackType
 	GoPSize          int
 	LoopVideo        bool
 	EncoderFrameRate int
 	OutputPath       string
 	RawOutputPath    string
+}
+
+type EncoderFrame struct {
+	KeyFrame bool
+	Data     []byte
+	Bitrate  int
 }
 
 type transcodingCtx struct {
@@ -81,6 +90,7 @@ type transcodingCtx struct {
 	frameChan    chan *Frame
 	frameCnt     int
 	nextKeyFrame int
+	frameBitrate int
 
 	//sws
 	swsCtx *C.struct_SwsContext
@@ -163,6 +173,7 @@ func setupEncoder(ctx *transcodingCtx) error {
 		"zerolatency":    "1",
 		"repeat_headers": "1",
 		"aud":            "1",
+
 		// For 10-bit: use P010 and consider profile=1
 		// "profile":   "1",
 	}
@@ -213,6 +224,7 @@ func setupEncoder(ctx *transcodingCtx) error {
 	ctx.encCodec.CAVCodecContext.max_b_frames = 0
 	ctx.encCodec.CAVCodecContext.gop_size = C.int(ctx.config.GoPSize)
 	ctx.encCodec.CAVCodecContext.bit_rate = C.long(ctx.config.InitialBitrate)
+	ctx.frameBitrate = ctx.config.InitialBitrate
 	ctx.encCodec.CAVCodecContext.pix_fmt = C.AV_PIX_FMT_CUDA
 
 	// --- 6) Apply encoder options
@@ -257,21 +269,6 @@ func setupEncoder(ctx *transcodingCtx) error {
 	}
 
 	return nil
-}
-
-func decode(ctx *transcodingCtx) {
-	for decodeStream(ctx) {
-	}
-}
-
-func encode(ctx *transcodingCtx, cancel context.CancelFunc) {
-	for {
-		done, _, _ := encodeStream(ctx)
-		if done {
-			break
-		}
-	}
-	cancel()
 }
 
 // returns false if EOF reached otherwise true
@@ -360,7 +357,7 @@ func getPacketBytes(p *Packet) []byte {
 	return frameBytes
 }
 
-func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
+func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 	var data []byte
 	var err error
 
@@ -372,7 +369,7 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 	}
 	ctx.frameCnt += 1
 
-	if ctx.frameCnt == ctx.nextKeyFrame {
+	if ctx.frameCnt+LOOKAHEAD == ctx.nextKeyFrame && ctx.config.KeyFrameCallback != nil {
 		bitrate := ctx.config.KeyFrameCallback()
 		ctx.encCodec.CAVCodecContext.bit_rate = C.long(bitrate)
 	}
@@ -380,7 +377,7 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 	err = ctx.encCodec.FeedFrame(frame)
 	if err != nil {
 		err = fmt.Errorf("error in feedframe %v", err)
-		return false, err, data
+		return false, nil, err
 	}
 
 	if ok {
@@ -392,6 +389,7 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 			panic(err)
 		}
 	}
+	keyFrame := false
 	for {
 		ret := ctx.encCodec.GetPacket(ctx.encPkt)
 		if ret == int(AVERROR(C.EAGAIN)) {
@@ -403,9 +401,9 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 			frameBytes := getPacketBytes(ctx.encPkt)
 
 			if (ctx.encPkt.CAVPacket.flags & C.AV_PKT_FLAG_KEY) != 0 {
-				// this encoded packet is keyframe
-				fmt.Println("frame ", ctx.frameCnt, " is a keyframe")
 				ctx.nextKeyFrame = ctx.frameCnt + ctx.config.GoPSize
+				ctx.frameBitrate = int(ctx.encCodec.CAVCodecContext.bit_rate)
+				keyFrame = true
 			}
 
 			// todo: remove later
@@ -445,7 +443,11 @@ func encodeStream(ctx *transcodingCtx) (bool, error, []byte) {
 	}
 
 	done := !ok
-	return done, nil, data
+	return done, &EncoderFrame{
+		KeyFrame: keyFrame,
+		Data:     data,
+		Bitrate:  ctx.frameBitrate,
+	}, nil
 }
 
 func AVERROR(e int) C.int {
@@ -464,15 +466,6 @@ func setup(ctx *transcodingCtx) error {
 	return nil
 }
 
-func TranscodeY4MToH265(ctx *transcodingCtx) error {
-	setup(ctx)
-	doneCtx, doneCancel := context.WithCancel(context.Background())
-	go decode(ctx)
-	go encode(ctx, doneCancel)
-	<-doneCtx.Done()
-	return nil
-}
-
 type FrameServingContext struct {
 	transcodingCtx *transcodingCtx
 
@@ -481,6 +474,10 @@ type FrameServingContext struct {
 	encodingEnded bool
 
 	encChan chan int
+
+	frameCnt       int
+	frameSizes     int
+	lastSetBitrate int
 }
 
 func (fsCtx *FrameServingContext) startDecoding() {
@@ -496,30 +493,39 @@ func (fsCtx *FrameServingContext) startDecoding() {
 
 func (fsCtx *FrameServingContext) Init(ctx *Config) {
 	tctx := &transcodingCtx{
-		config: ctx,
+		config:       ctx,
+		nextKeyFrame: -1,
 	}
 
 	fsCtx.transcodingCtx = tctx
-
 	fsCtx.transcodingCtx.rawOutputFile, _ = os.Create(ctx.RawOutputPath)
-
 	fsCtx.bufferGap = 10
 	if err := setup(fsCtx.transcodingCtx); err != nil {
 		panic(err)
 	}
 
 	fsCtx.encChan = make(chan int, fsCtx.bufferGap+1)
-
 	go fsCtx.startDecoding()
+
+	// consume decoded frames that produce no encoded frames
+	for i := 0; i < LOOKAHEAD; i++ {
+		frame := fsCtx.GetNextFrame()
+		if len(frame.Data) != 0 {
+			panic("non empty buffer returned from a lookahead frame")
+		}
+	}
+	fsCtx.frameCnt = 0
 }
 
-func (fsCtx *FrameServingContext) GetNextFrame() []byte {
-	var x []byte
+func (fsCtx *FrameServingContext) GetNextFrame() *EncoderFrame {
 	if fsCtx.encodingEnded {
-		return x
+		return &EncoderFrame{
+			Data: nil,
+		}
 	}
 
-	done, err, data := encodeStream(fsCtx.transcodingCtx)
+	fsCtx.frameCnt++
+	done, frame, err := encodeStream(fsCtx.transcodingCtx)
 	if err != nil {
 		panic("encoder returned error (handle later)")
 	}
@@ -528,5 +534,5 @@ func (fsCtx *FrameServingContext) GetNextFrame() []byte {
 		fsCtx.encodingEnded = true
 	}
 
-	return data
+	return frame
 }
