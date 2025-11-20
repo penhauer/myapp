@@ -12,6 +12,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
+	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -33,10 +34,15 @@ type sessionSetup struct {
 	iceConnectedCtxCancel context.CancelFunc
 }
 
-func getTime() string {
-	now := time.Now()
-	return fmt.Sprintf("%02d:%02d:%03d -- ", now.Minute(), now.Second(), now.Nanosecond()/1e6)
+func setup_logger() logging.LeveledLogger {
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	fmt.Println(loggerFactory.DefaultLogLevel.Get())
+	loggerFactory.DefaultLogLevel.Set(logging.LogLevelError)
+	logger := loggerFactory.NewLogger("sender")
+	return logger
 }
+
+var logger logging.LeveledLogger = setup_logger()
 
 func setupConnectionStateHandler(ss *sessionSetup) {
 	// Set the handler for Peer connection state
@@ -171,8 +177,8 @@ func setupPeerConnection() (chan *cc.BandwidthEstimator, *webrtc.PeerConnection)
 func getExperimentDirEnvVar() string {
 	dir := os.Getenv("EXPERIMENT_DIR")
 	if dir == "" {
+		logger.Warn("required environment variable EXPERIMENT_DIR is not set. using ./ as EXPERIMENT_DIR")
 		dir = "."
-		fmt.Println("ERROR required environment variable EXPERIMENT_DIR is not set")
 	}
 	return dir
 }
@@ -182,7 +188,8 @@ func handle_video(ss *sessionSetup, durationSec int) {
 	haveVideoFile := !os.IsNotExist(err)
 
 	if !haveVideoFile {
-		panic("Could not find `" + videoFileName + "`")
+		logger.Error("Could not find `" + videoFileName + "`")
+		panic("")
 	}
 
 	initialBitrate := 2_500_000
@@ -263,7 +270,7 @@ func handle_video(ss *sessionSetup, durationSec int) {
 				sizeSum += len(frame.Data)
 				if frame.KeyFrame {
 					diff := 100.0 * (sizeSum*8.0 - lastSetBitrate) / lastSetBitrate
-					fmt.Printf("Keyframe seen. sizeSumBits=%d lastSetBitrate=%d diff=%v\n", sizeSum*8, lastSetBitrate, diff)
+					logger.Infof("Keyframe seen. sizeSumBits=%d lastSetBitrate=%d diff=%v\n", sizeSum*8, lastSetBitrate, diff)
 					lastSetBitrate = frame.Bitrate
 					sizeSum = 0
 				}
@@ -273,8 +280,7 @@ func handle_video(ss *sessionSetup, durationSec int) {
 				}
 
 				elapsed := time.Since(start)
-				fmt.Printf("%s elapsed=%v target bitrate=%d frame_bitrate= %d frame_size_bits=%d fcnt=%d \n",
-					getTime(),
+				logger.Infof("elapsed=%v target bitrate=%d frame_bitrate= %d frame_size_bits=%d fcnt=%d \n",
 					elapsed,
 					targetBitrate,
 					frame.Bitrate,
@@ -285,7 +291,7 @@ func handle_video(ss *sessionSetup, durationSec int) {
 					panic(err)
 				}
 			case <-done:
-				fmt.Printf("%s streaming duration of %d seconds reached, exiting\n", getTime(), durationSec)
+				logger.Infof("treaming duration of %d seconds reached, exiting\n", durationSec)
 				os.Exit(0)
 			}
 		}

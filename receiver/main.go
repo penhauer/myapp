@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
@@ -88,9 +89,6 @@ func main() {
 			return
 		}
 
-		// jj, _ := json.Marshal(candidate)
-		// println("Signalling ICE candidate ", string(jj))
-
 		candidatesMux.Lock()
 		defer candidatesMux.Unlock()
 
@@ -110,7 +108,6 @@ func main() {
 		if candidateErr != nil {
 			panic(candidateErr)
 		}
-		println("Received candidate: ", string(candidate))
 		if candidateErr := peerConnection.AddICECandidate(
 			webrtc.ICECandidateInit{Candidate: string(candidate)},
 		); candidateErr != nil {
@@ -228,19 +225,19 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 		}
 	}()
 
-	// print the start time to stdout
-	now := time.Now()
+	loggerFactory := logging.NewDefaultLoggerFactory()
+	fmt.Println(loggerFactory.DefaultLogLevel.Get())
+	loggerFactory.DefaultLogLevel.Set(logging.LogLevelInfo)
+	logger := loggerFactory.NewLogger("receiver")
+	logger.Debugf("Start reception at %s\n", time.Now().Format(time.StampMilli))
 
 	frameCnt := 0
 	var frameBytes int
-
-	fmt.Printf("Start reception at %s\n", now.Format(time.StampMilli))
-
 	for {
 		p, a, err := track.ReadRTP()
 
 		if err != nil {
-			fmt.Printf("error reading RTP: %v\n", err)
+			logger.Errorf("error reading RTP: %v\n", err)
 			return
 		}
 
@@ -257,17 +254,17 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 		if p.Header.Marker {
 			frameCnt++
 			// print the time for reception of the frame to stdout and its total size
-			fmt.Printf("Frame %d received marker at %s, size=%d bytes\n",
+			logger.Debugf("Frame %d received marker at %s, size=%d bytes\n",
 				frameCnt, time.Now().Format(time.StampMicro), frameBytes)
 			// reset frame byte counter for next frame
 			frameBytes = 0
 		}
 
-		fmt.Printf("Received RTP Packet seq=%d marker=%t ecn=%v pkt_size=%d marked_count=%d\n",
+		logger.Debugf("Received RTP Packet seq=%d marker=%t ecn=%v pkt_size=%d marked_count=%d\n",
 			p.SequenceNumber, p.Header.Marker, ecn, packetSize, frameCnt)
 
 		if err := writer.WriteRTP(p); err != nil {
-			fmt.Printf("error writing RTP to file: %v", err)
+			logger.Errorf("error writing RTP to file: %v", err)
 			return
 		}
 
