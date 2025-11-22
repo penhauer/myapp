@@ -6,15 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/pion/webrtc/v4"
 )
 
 func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 	payload := []byte(candidate.ToJSON().Candidate)
-
-	// x, _ := json.Marshal(candidate.ToJSON())
-	// println(getTime(), "signalling candidate ", string(x))
 
 	resp, err := http.Post( //nolint:noctx
 		fmt.Sprintf("http://%s/candidate", addr),
@@ -33,15 +31,14 @@ func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 // candidates which may be slower
 func setupCandidateHandler(ss *sessionSetup) {
 	http.HandleFunc("/candidate", func(res http.ResponseWriter, req *http.Request) { //nolint: revive
-		candidate, candidateErr := io.ReadAll(req.Body)
-		if candidateErr != nil {
-			panic(candidateErr)
+		candidate, err := io.ReadAll(req.Body)
+		if err != nil {
+			panic(err)
 		}
-		// println("Received candidate", string(candidate))
-		if candidateErr := ss.peerConnection.AddICECandidate(
+		if err := ss.peerConnection.AddICECandidate(
 			webrtc.ICECandidateInit{Candidate: string(candidate)},
-		); candidateErr != nil {
-			panic(candidateErr)
+		); err != nil {
+			panic(err)
 		}
 	})
 }
@@ -50,21 +47,19 @@ func setupCandidateHandler(ss *sessionSetup) {
 func setupSDPHandler(ss *sessionSetup) {
 	http.HandleFunc("/sdp", func(res http.ResponseWriter, req *http.Request) {
 		sdp := webrtc.SessionDescription{}
-		if sdpErr := json.NewDecoder(req.Body).Decode(&sdp); sdpErr != nil {
-			panic(sdpErr)
+		if err := json.NewDecoder(req.Body).Decode(&sdp); err != nil {
+			panic(err)
 		}
 
-		// println(getTime(), "Receieved SDP ")
-
-		if sdpErr := ss.peerConnection.SetRemoteDescription(sdp); sdpErr != nil {
-			panic(sdpErr)
+		if err := ss.peerConnection.SetRemoteDescription(sdp); err != nil {
+			panic(err)
 		}
 
 		ss.candidatesMux.Lock()
 		defer ss.candidatesMux.Unlock()
 
 		for _, c := range ss.pendingCandidates {
-			if onICECandidateErr := signalCandidate(*ss.answerAddr, c); onICECandidateErr != nil {
+			if onICECandidateErr := signalCandidate(*ss.config.AnswerAddress, c); onICECandidateErr != nil {
 				panic(onICECandidateErr)
 			}
 		}
@@ -90,7 +85,7 @@ func sendOffer(ss *sessionSetup) {
 		panic(err)
 	}
 	resp, err := http.Post( //nolint:noctx
-		fmt.Sprintf("http://%s/sdp", *ss.answerAddr),
+		fmt.Sprintf("http://%s/sdp", *ss.config.AnswerAddress),
 		"application/json; charset=utf-8",
 		bytes.NewReader(payload),
 	)
@@ -99,4 +94,53 @@ func sendOffer(ss *sessionSetup) {
 	} else if err := resp.Body.Close(); err != nil {
 		panic(err)
 	}
+}
+
+func setupConnectionStateHandler(ss *sessionSetup) {
+
+	// Set the handler for Peer connection state
+	// This will notify you when the peer has connected/disconnected
+	ss.peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		fmt.Printf("Peer Connection State has changed: %s\n", state.String())
+
+		if state == webrtc.PeerConnectionStateFailed {
+			// Wait until PeerConnection has had no network activity for 30 seconds or another failure.
+			// It may be reconnected using an ICE Restart.
+			// Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
+			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
+			fmt.Println("Peer Connection has gone to failed exiting")
+			os.Exit(0)
+		}
+
+		if state == webrtc.PeerConnectionStateClosed {
+			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
+			fmt.Println("Peer Connection has gone to closed exiting")
+			os.Exit(0)
+		}
+
+		if state == webrtc.PeerConnectionStateConnected {
+			fmt.Println("Peer Connection has been established")
+			ss.iceConnectedCtxCancel()
+		}
+	})
+}
+
+func setupICECandidateHandler(ss *sessionSetup) {
+	// When an ICE candidate is available send to the other Pion instance
+	// the other Pion instance will add this candidate by calling AddICECandidate
+	ss.peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+		if candidate == nil {
+			return
+		}
+
+		ss.candidatesMux.Lock()
+		defer ss.candidatesMux.Unlock()
+
+		desc := ss.peerConnection.RemoteDescription()
+		if desc == nil {
+			ss.pendingCandidates = append(ss.pendingCandidates, candidate)
+		} else if err := signalCandidate(*ss.config.AnswerAddress, candidate); err != nil {
+			panic(err)
+		}
+	})
 }
