@@ -205,7 +205,7 @@ func configure_transcoder(ss *sessionSetup) {
 		LoopVideo:        ss.config.EncoderConfig.LoopVideo,
 		InitialBitrate:   *ec.InitialBitrate,
 		GoPSize:          30,
-		EncoderFrameRate: *ec.FrameRate, // whether we send the frames with this frame rate is another not a business of encoder
+		EncoderFrameRate: *ec.FrameRate, // whether we send the frames with this frame rate is not a business of the encoder
 		KeyFrameCallback: keyFrameCallback,
 		OutputPath:       filepath.Join(ss.config.ConfigDir, "raw.x265"),
 		RawOutputPath:    filepath.Join(ss.config.ConfigDir, "output.mp4"),
