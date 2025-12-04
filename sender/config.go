@@ -6,7 +6,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+type CCAType string
+
+const (
+	CCAUnknown CCAType = ""
+	GCC        CCAType = "gcc"
+	SCREAM     CCAType = "scream"
+)
+
+func (c CCAType) String() string { return string(c) }
+
+// UnmarshalJSON validates that the input is a known CCA value.
+func (c *CCAType) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	s = strings.ToLower(s)
+	switch s {
+	case "", string(GCC), string(SCREAM):
+		*c = CCAType(s)
+		return nil
+	default:
+		return fmt.Errorf("unknown CCA value %q", s)
+	}
+}
 
 type VideoSenderConfig struct {
 	ConfigDir     string
@@ -15,6 +42,7 @@ type VideoSenderConfig struct {
 	Video         *string       `json:"video"`
 	Duration      *int          `json:"duration"`
 	EncoderConfig EncoderConfig `json:"encoder"`
+	CCA           CCAType       `json:"CCA"`
 }
 
 type EncoderConfig struct {

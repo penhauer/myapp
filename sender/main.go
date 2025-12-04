@@ -12,6 +12,7 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/cc"
 	"github.com/pion/interceptor/pkg/gcc"
+	"github.com/pion/interceptor/pkg/scream"
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
@@ -19,6 +20,8 @@ import (
 
 	"myapp/transcoder"
 )
+
+type bitrateEstimator func(SSRC uint32) int
 
 type sessionSetup struct {
 	logger logging.LeveledLogger
@@ -35,15 +38,14 @@ type sessionSetup struct {
 	interceptorRegistry *interceptor.Registry
 	peerConnection      *webrtc.PeerConnection
 
-	estimatorChan chan *cc.BandwidthEstimator
-	estimator     *cc.BandwidthEstimator
+	estimatorChan chan bitrateEstimator
+	estimator     bitrateEstimator
 
 	fsCtx *transcoder.FrameServingContext
 }
 
 func setup_logger() logging.LeveledLogger {
 	loggerFactory := logging.NewDefaultLoggerFactory()
-	fmt.Println(loggerFactory.DefaultLogLevel.Get())
 	loggerFactory.DefaultLogLevel.Set(logging.LogLevelDebug)
 	logger := loggerFactory.NewLogger("sender")
 	return logger
@@ -124,20 +126,42 @@ func registerInterceptors(s *sessionSetup) error {
 	}
 
 	check_encoder_config(s)
-	lowBitrate := *s.config.EncoderConfig.InitialBitrate
-	ccInterceptor, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-		return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(lowBitrate))
-	})
-	if err != nil {
-		return err
+	initialBitrate := *s.config.EncoderConfig.InitialBitrate
+	s.estimatorChan = make(chan bitrateEstimator, 1)
+	switch s.config.CCA {
+	case GCC:
+		ccInterceptor, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
+			return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(initialBitrate))
+		})
+		if err != nil {
+			return err
+		}
+
+		ccInterceptor.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) { //nolint: revive
+			f := func(ssrc uint32) int {
+				return estimator.GetTargetBitrate()
+			}
+			s.estimatorChan <- f
+		})
+		s.interceptorRegistry.Add(ccInterceptor)
+	case SCREAM:
+		screamInterceptor, err := scream.NewSenderInterceptor(scream.InitialBitrate(float64(initialBitrate)))
+		if err != nil {
+			return err
+		}
+		screamInterceptor.OnNewPeerConnection(func(id string, estimator scream.BandwidthEstimator) { //nolint: revive
+			f := func(ssrc uint32) int {
+				bitrate, err := estimator.GetTargetBitrate(ssrc)
+				if err != nil {
+					panic(err)
+				}
+				return bitrate
+			}
+			s.estimatorChan <- f
+		})
+		s.interceptorRegistry.Add(screamInterceptor)
 	}
 
-	s.estimatorChan = make(chan *cc.BandwidthEstimator, 1)
-	ccInterceptor.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) { //nolint: revive
-		s.estimatorChan <- &estimator
-	})
-
-	s.interceptorRegistry.Add(ccInterceptor)
 	return nil
 }
 
@@ -156,9 +180,6 @@ func check_encoder_config(ss *sessionSetup) {
 }
 
 func handle_video(ss *sessionSetup) {
-	check_encoder_config(ss)
-	configure_transcoder(ss)
-
 	// Create a video track
 	trackCodec := webrtc.MimeTypeH265
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
@@ -169,6 +190,11 @@ func handle_video(ss *sessionSetup) {
 	}
 
 	rtpSender, err := ss.peerConnection.AddTrack(videoTrack)
+	ssrc := uint32(rtpSender.GetParameters().Encodings[0].SSRC)
+
+	check_encoder_config(ss)
+	configure_transcoder(ss, ssrc)
+
 	if err != nil {
 		panic(err)
 	}
@@ -182,21 +208,20 @@ func handle_video(ss *sessionSetup) {
 
 	go func() {
 		<-ss.iceConnectedCtx.Done()
-		stream_video(ss, videoTrack)
+		stream_video(ss, videoTrack, ssrc)
 	}()
 }
 
-func configure_transcoder(ss *sessionSetup) {
+func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 	ec := ss.config.EncoderConfig
 	ss.estimator = <-ss.estimatorChan
 	keyFrameCallback := func() int {
-		bitrate := (*ss.estimator).GetTargetBitrate()
+		bitrate := ss.estimator(ssrc)
 		ss.logger.Infof("Encoder's bitrate set to %v at %v\n", bitrate, time.Now())
 		return bitrate
 	}
 	// keyFrameCallback = nil
 
-	fmt.Println("amir config dir is ", ss.config.ConfigDir)
 	ctx := &transcoder.Config{
 		Codec:            "hevc_nvenc",
 		TargetW:          3840,
@@ -215,7 +240,7 @@ func configure_transcoder(ss *sessionSetup) {
 	ss.fsCtx.Init(ctx)
 }
 
-func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample) {
+func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, ssrc uint32) {
 	ec := ss.config.EncoderConfig
 	streamingDuration := *ss.config.Duration
 	tickDuration := time.Millisecond * time.Duration(1000/(*ec.FrameRate))
@@ -236,7 +261,7 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample) {
 		case <-ticker.C:
 			fcnt++
 
-			targetBitrate := (*ss.estimator).GetTargetBitrate()
+			targetBitrate := ss.estimator(ssrc)
 			frame := ss.fsCtx.GetNextFrame()
 
 			sizeSum += len(frame.Data)
