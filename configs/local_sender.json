@@ -1,0 +1,12 @@
+{
+    "offer_address": "127.0.0.1:50000",
+    "answer_address": "127.0.0.1:60000",
+    "video": "/home/amirmo/testbed/video/ecn-pion/video_generator/video_files/4.y4m",
+    "duration": 30,
+    "cca": "scream",
+    "encoder": {
+        "frame_rate": 30,
+        "initial_bitrate": 2500000,
+        "loop_video": true
+    }
+}
