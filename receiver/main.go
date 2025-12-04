@@ -5,7 +5,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,9 +23,10 @@ import (
 var logger logging.LeveledLogger = setup_logger()
 
 func main() {
-	offerAddr := flag.String("offer-address", "localhost:50000", "Address that the Offer HTTP server is hosted on.")
-	answerAddr := flag.String("answer-address", "0.0.0.0:60000", "Address that the Answer HTTP server is hosted on.")
-	flag.Parse()
+	receiverConfig, err := readReceiverConfigFile()
+	if err != nil {
+		panic(err)
+	}
 
 	mediaEngine, interceptorRegistry, err := registerInterceptors()
 	if err != nil {
@@ -55,12 +55,12 @@ func main() {
 	}()
 
 	// register signaling, ICE and connection-state handlers (moved to util.go)
-	registerSignalingHandlers(peerConnection, offerAddr)
+	registerSignalingHandlers(peerConnection, receiverConfig.OfferAddress)
 
 	handle_video(peerConnection)
 
 	// Start HTTP server that accepts requests from the offer process to exchange SDP and Candidates
-	panic(http.ListenAndServe(*answerAddr, nil))
+	panic(http.ListenAndServe(receiverConfig.AnswerAddress, nil))
 }
 
 func registerInterceptors() (*webrtc.MediaEngine, *interceptor.Registry, error) {

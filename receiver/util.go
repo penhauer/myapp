@@ -27,7 +27,7 @@ func signalCandidate(addr string, candidate *webrtc.ICECandidate) error {
 
 // registerSignalingHandlers wires up ICE candidate handling, SDP exchange and connection-state handling.
 // It registers HTTP handlers for /candidate and /sdp but does not start the HTTP server.
-func registerSignalingHandlers(peerConnection *webrtc.PeerConnection, offerAddr *string) {
+func registerSignalingHandlers(peerConnection *webrtc.PeerConnection, offerAddr string) {
 
 	var candidatesMux sync.Mutex
 	pendingCandidates := make([]*webrtc.ICECandidate, 0)
@@ -44,7 +44,7 @@ func registerSignalingHandlers(peerConnection *webrtc.PeerConnection, offerAddr 
 		desc := peerConnection.RemoteDescription()
 		if desc == nil {
 			pendingCandidates = append(pendingCandidates, candidate)
-		} else if err := signalCandidate(*offerAddr, candidate); err != nil {
+		} else if err := signalCandidate(offerAddr, candidate); err != nil {
 			panic(err)
 		}
 	})
@@ -85,7 +85,7 @@ func registerSignalingHandlers(peerConnection *webrtc.PeerConnection, offerAddr 
 			panic(err)
 		}
 		resp, err := http.Post( //nolint:noctx
-			fmt.Sprintf("http://%s/sdp", *offerAddr),
+			fmt.Sprintf("http://%s/sdp", offerAddr),
 			"application/json; charset=utf-8",
 			bytes.NewReader(payload),
 		) // nolint:noctx
@@ -103,7 +103,7 @@ func registerSignalingHandlers(peerConnection *webrtc.PeerConnection, offerAddr 
 
 		candidatesMux.Lock()
 		for _, c := range pendingCandidates {
-			if onICECandidateErr := signalCandidate(*offerAddr, c); onICECandidateErr != nil {
+			if onICECandidateErr := signalCandidate(offerAddr, c); onICECandidateErr != nil {
 				panic(onICECandidateErr)
 			}
 		}
