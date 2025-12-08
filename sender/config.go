@@ -39,6 +39,7 @@ type VideoSenderConfig struct {
 	ConfigDir     string
 	AnswerAddress *string       `json:"answer_address"`
 	OfferAddress  *string       `json:"offer_address"`
+	OutputDir     string        `json:"output_dir"`
 	Video         *string       `json:"video"`
 	Duration      *int          `json:"duration"`
 	EncoderConfig EncoderConfig `json:"encoder"`
@@ -46,9 +47,10 @@ type VideoSenderConfig struct {
 }
 
 type EncoderConfig struct {
-	FrameRate      *int `json:"frame_rate"`
-	InitialBitrate *int `json:"initial_bitrate"`
-	LoopVideo      bool `json:"loop_video"`
+	FrameRate       *int `json:"frame_rate"`
+	InitialBitrate  *int `json:"initial_bitrate"`
+	AdaptiveBitrate bool `json:"adaptive_bitrate"`
+	LoopVideo       bool `json:"loop_video"`
 }
 
 func readSenderConfigFile() (*VideoSenderConfig, error) {
@@ -72,6 +74,10 @@ func readSenderConfigFile() (*VideoSenderConfig, error) {
 	// Set ConfigDir to the directory containing the config file for any
 	// downstream users that might expect it.
 	cfg.ConfigDir = filepath.Dir(*configPath)
+
+	if cfg.OutputDir == "" {
+		cfg.OutputDir = "."
+	}
 
 	return cfg, nil
 }

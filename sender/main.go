@@ -180,6 +180,10 @@ func check_encoder_config(ss *sessionSetup) {
 }
 
 func handle_video(ss *sessionSetup) {
+	if err := os.MkdirAll(ss.config.OutputDir, 0755); err != nil {
+		panic(err)
+	}
+
 	// Create a video track
 	trackCodec := webrtc.MimeTypeH265
 	videoTrack, err := webrtc.NewTrackLocalStaticSample(
@@ -215,12 +219,15 @@ func handle_video(ss *sessionSetup) {
 func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 	ec := ss.config.EncoderConfig
 	ss.estimator = <-ss.estimatorChan
-	keyFrameCallback := func() int {
-		bitrate := ss.estimator(ssrc)
-		ss.logger.Infof("Encoder's bitrate set to %v at %v\n", bitrate, time.Now())
-		return bitrate
+
+	var keyFrameCallback transcoder.KeyFrameCallbackType = nil
+	if ss.config.EncoderConfig.AdaptiveBitrate {
+		keyFrameCallback = func() int {
+			bitrate := ss.estimator(ssrc)
+			ss.logger.Infof("Encoder's bitrate set to %v at %v\n", bitrate, time.Now())
+			return bitrate
+		}
 	}
-	// keyFrameCallback = nil
 
 	ctx := &transcoder.Config{
 		Codec:            "hevc_nvenc",
@@ -232,8 +239,8 @@ func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 		GoPSize:          30,
 		EncoderFrameRate: *ec.FrameRate, // whether we send the frames with this frame rate is not a business of the encoder
 		KeyFrameCallback: keyFrameCallback,
-		OutputPath:       filepath.Join(ss.config.ConfigDir, "raw.x265"),
-		RawOutputPath:    filepath.Join(ss.config.ConfigDir, "output.mp4"),
+		OutputPath:       filepath.Join(ss.config.OutputDir, "output.mp4"),
+		RawOutputPath:    filepath.Join(ss.config.OutputDir, "raw.x265"),
 	}
 
 	ss.fsCtx = &transcoder.FrameServingContext{}
