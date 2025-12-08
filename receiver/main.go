@@ -57,7 +57,7 @@ func main() {
 	// register signaling, ICE and connection-state handlers (moved to util.go)
 	registerSignalingHandlers(peerConnection, receiverConfig.OfferAddress)
 
-	handle_video(peerConnection)
+	handle_video(peerConnection, receiverConfig)
 
 	// Start HTTP server that accepts requests from the offer process to exchange SDP and Candidates
 	panic(http.ListenAndServe(receiverConfig.AnswerAddress, nil))
@@ -84,8 +84,11 @@ func setup_logger() logging.LeveledLogger {
 	return logger
 }
 
-func handle_video(peerConnection *webrtc.PeerConnection) {
-	outputFile := filepath.Join(getExperimentDirEnvVar(), "/received.h265")
+func handle_video(peerConnection *webrtc.PeerConnection, config *VideoReceiverConfig) {
+	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
+		panic(err)
+	}
+	outputFile := filepath.Join(config.OutputDir, "received.h265")
 	writer, err := h265writer.New(outputFile)
 	if err != nil {
 		panic(err)
@@ -99,15 +102,6 @@ func handle_video(peerConnection *webrtc.PeerConnection) {
 		}
 	})
 
-}
-
-func getExperimentDirEnvVar() string {
-	dir := os.Getenv("EXPERIMENT_DIR")
-	if dir == "" {
-		logger.Warn("required environment variable EXPERIMENT_DIR is not set")
-		dir = "."
-	}
-	return dir
 }
 
 func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {

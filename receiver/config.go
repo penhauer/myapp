@@ -11,6 +11,7 @@ import (
 type VideoReceiverConfig struct {
 	AnswerAddress string `json:"answer_address"`
 	OfferAddress  string `json:"offer_address"`
+	OutputDir     string `json:"output_dir"`
 
 	// ConfigDir is set to the directory containing the config file.
 	// It is not read from JSON.
@@ -37,6 +38,9 @@ func readReceiverConfigFile() (*VideoReceiverConfig, error) {
 
 	// Set ConfigDir to the directory containing the config file for downstream users.
 	cfg.ConfigDir = filepath.Dir(*configPath)
+	if cfg.OutputDir == "" {
+		cfg.OutputDir = "."
+	}
 
 	return cfg, nil
 }
