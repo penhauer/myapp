@@ -1,10 +1,3 @@
-input.ivf
-output.ivf
+output/**
 receiver.log
 sender.log
-
-output.mp4
-received.h265
-raw.x265
-input.y4m
-
