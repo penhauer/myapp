@@ -406,13 +406,8 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 				keyFrame = true
 			}
 
-			// todo: remove later
+			ctx.rawOutputFile.Write(frameBytes)
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
-
-			// todo: remove later
-			// if (ctx.frameCnt%30)%2 == 1 {
-			// 	ctx.f.Write(frameBytes)
-			// }
 
 			// fmt.Printf("frame: %v \n", ctx.frameCnt)
 			// PrintHEVCNALs(frameBytes)
@@ -428,17 +423,16 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 	}
 
 	if !ok {
-		// todo: remove later
 		ctx.rawOutputFile.Close()
 
 		C.av_write_trailer(ctx.encFmt.CAVFormatContext)
 
-		// 3. Close the output file handle
+		// Close the output file handle
 		if ctx.encFmt.CAVFormatContext.pb != nil {
 			C.avio_closep(&ctx.encFmt.CAVFormatContext.pb)
 		}
 
-		// 4. Free the format context
+		// Free the format context
 		C.avformat_free_context(ctx.encFmt.CAVFormatContext)
 	}
 
