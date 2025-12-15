@@ -145,7 +145,10 @@ func registerInterceptors(s *sessionSetup) error {
 		})
 		s.interceptorRegistry.Add(ccInterceptor)
 	case SCREAM:
-		screamInterceptor, err := scream.NewSenderInterceptor(scream.InitialBitrate(float64(initialBitrate)))
+		screamInterceptor, err := scream.NewSenderInterceptor(
+			scream.InitialBitrate(float64(initialBitrate)),
+			scream.IsL4S(true),
+		)
 		if err != nil {
 			return err
 		}
