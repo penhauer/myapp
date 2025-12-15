@@ -92,6 +92,9 @@ type transcodingCtx struct {
 	nextKeyFrame int
 	frameBitrate int
 
+	realFrameCnt  int
+	droppedFrames int
+
 	//sws
 	swsCtx *C.struct_SwsContext
 	swNV12 *Frame
@@ -400,18 +403,39 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 
 			frameBytes := getPacketBytes(ctx.encPkt)
 
-			if (ctx.encPkt.CAVPacket.flags & C.AV_PKT_FLAG_KEY) != 0 {
+			isKeyFrame := ctx.encPkt.CAVPacket.flags & C.AV_PKT_FLAG_KEY
+			if isKeyFrame != 0 {
 				ctx.nextKeyFrame = ctx.frameCnt + ctx.config.GoPSize
 				ctx.frameBitrate = int(ctx.encCodec.CAVCodecContext.bit_rate)
 				keyFrame = true
 			}
 
-			ctx.rawOutputFile.Write(frameBytes)
+			// dropF := func() {
+			// 	ctx.droppedFrames += 1
+			// }
+			// saveF := func() {
+			// 	ctx.rawOutputFile.Write(frameBytes)
+			// }
+
+			// if len(frameBytes) > 0 {
+			// 	if ctx.realFrameCnt >= 60 && keyFrame {
+			// 		dropF()
+			// 		if keyFrame {
+			// 			fmt.Println("Dropping a Keyframe")
+			// 		}
+			// 	} else {
+			// 		if keyFrame {
+			// 			// panic("noooooo")
+			// 			fmt.Println("Saving a Keyframe")
+			// 		}
+			// 		saveF()
+			// 	}
+			// 	ctx.realFrameCnt += 1
+			// }
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
 
 			// fmt.Printf("frame: %v \n", ctx.frameCnt)
 			// PrintHEVCNALs(frameBytes)
-
 			data = append(data, frameBytes...)
 
 			ctx.encPkt.Unref()
@@ -424,6 +448,7 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 
 	if !ok {
 		ctx.rawOutputFile.Close()
+		// fmt.Printf("Total frames: %v   dropped: %v   saved: %v\n", ctx.realFrameCnt, ctx.droppedFrames, ctx.realFrameCnt-ctx.droppedFrames)
 
 		C.av_write_trailer(ctx.encFmt.CAVFormatContext)
 
