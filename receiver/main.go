@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -79,20 +78,44 @@ func registerInterceptors() (*webrtc.MediaEngine, *interceptor.Registry, error) 
 
 func setup_logger() logging.LeveledLogger {
 	loggerFactory := logging.NewDefaultLoggerFactory()
-	loggerFactory.DefaultLogLevel.Set(logging.LogLevelDebug)
+	loggerFactory.DefaultLogLevel.Set(logging.LogLevelInfo)
 	logger := loggerFactory.NewLogger("receiver")
 	return logger
 }
+
+// type Writer interface {
+// 	Write(p []byte) (n int, err error)
+// }
+
+// type MyWriter struct {
+// 	tCtx *transcodingCtx
+// }
+
+// func (m *MyWriter) Write(p []byte) (n int, err error) {
+// 	n, err = m.tCtx.FeedBytes(p)
+// 	return
+// }
 
 func handle_video(peerConnection *webrtc.PeerConnection, config *VideoReceiverConfig) {
 	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
 		panic(err)
 	}
-	outputFile := filepath.Join(config.OutputDir, "received.h265")
-	writer, err := h265writer.New(outputFile)
-	if err != nil {
-		panic(err)
+
+	// outputFile := filepath.Join(config.OutputDir, "received.h265")
+	// writer, err := h265writer.New(outputFile)
+	// if err != nil {
+	// 	panic(err)
+	// }
+
+	tCtx := &transcodingCtx{
+		config: &Config{
+			// Codec: "hevc_nvenc",
+			Codec: "hevc",
+		},
 	}
+	tCtx.setupDecoder()
+
+	writer := h265writer.NewTimestampAware(tCtx.FeedBytes)
 
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) { //nolint: revive
 		codec := track.Codec()
