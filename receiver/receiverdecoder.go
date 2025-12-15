@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"log"
 	"myapp/transcoder"
+	"os"
 	"unsafe"
 )
 
@@ -60,6 +61,8 @@ type transcodingCtx struct {
 	inbuf unsafe.Pointer
 
 	frameCnt int
+
+	f *os.File
 }
 
 func (ctx *transcodingCtx) setupDecoder() error {
@@ -107,6 +110,12 @@ func (ctx *transcodingCtx) setupDecoder() error {
 
 	ctx.decFrame, err = NewFrame()
 	if err != nil {
+		panic(err)
+	}
+
+	ctx.f, err = os.OpenFile("/tmp/video.yuv", os.O_WRONLY, 0600)
+	if err != nil {
+		fmt.Println("could not open the output file")
 		panic(err)
 	}
 
@@ -177,6 +186,22 @@ func (ctx *transcodingCtx) FeedBytes(buff []byte, frameCnt uint32) error {
 	return nil
 }
 
+func (ctx *transcodingCtx) writeFrameToFFPlay(f *C.AVFrame) {
+
+	w := int(ctx.decFrame.CAVFrame.width)
+	h := int(ctx.decFrame.CAVFrame.height)
+
+	ySize := w * h
+	uvSize := ySize / 4
+
+	// Y
+	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[0]), C.int(ySize)))
+	// U
+	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[1]), C.int(uvSize)))
+	// V
+	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[2]), C.int(uvSize)))
+}
+
 func (ctx *transcodingCtx) receiveFrame(cnt uint32) {
 	for {
 		code := int(C.avcodec_receive_frame(ctx.decCodec.CAVCodecContext, ctx.decFrame.CAVFrame))
@@ -192,6 +217,7 @@ func (ctx *transcodingCtx) receiveFrame(cnt uint32) {
 				ctx.decFrame.CAVFrame.format,
 				// ctx.decFrame.CAVFrame.pts,
 			)
+			ctx.writeFrameToFFPlay(ctx.decFrame.CAVFrame)
 
 			ctx.decFrame.Unref()
 			continue
