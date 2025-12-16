@@ -12,6 +12,7 @@ type VideoReceiverConfig struct {
 	AnswerAddress string `json:"answer_address"`
 	OfferAddress  string `json:"offer_address"`
 	OutputDir     string `json:"output_dir"`
+	FrameRate     uint32 `json:"frame_rate"`
 
 	// ConfigDir is set to the directory containing the config file.
 	// It is not read from JSON.

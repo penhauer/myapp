@@ -9,14 +9,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/h265writer"
 )
 
 var logger logging.LeveledLogger = setup_logger()
@@ -83,71 +80,38 @@ func setup_logger() logging.LeveledLogger {
 	return logger
 }
 
-// type Writer interface {
-// 	Write(p []byte) (n int, err error)
-// }
-
-// type MyWriter struct {
-// 	tCtx *transcodingCtx
-// }
-
-// func (m *MyWriter) Write(p []byte) (n int, err error) {
-// 	n, err = m.tCtx.FeedBytes(p)
-// 	return
-// }
-
 func handle_video(peerConnection *webrtc.PeerConnection, config *VideoReceiverConfig) {
 	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
 		panic(err)
 	}
 
-	// outputFile := filepath.Join(config.OutputDir, "received.h265")
-	// writer, err := h265writer.New(outputFile)
-	// if err != nil {
-	// 	panic(err)
-	// }
-
-	tCtx := &transcodingCtx{
-		config: &Config{
-			// Codec: "hevc_nvenc",
-			Codec: "hevc",
-		},
-	}
-	tCtx.setupDecoder()
-
-	writer := h265writer.NewTimestampAware(tCtx.FeedBytes)
-
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) { //nolint: revive
 		codec := track.Codec()
 		if strings.EqualFold(codec.MimeType, webrtc.MimeTypeH265) {
 			logger.Info("Got H265 track, saving to disk as recevied.265")
-			saveToDisk(writer, track)
+			saveToDisk(track, config)
 		}
 	})
-
 }
 
-func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
-	defer func() {
-		if err := writer.Close(); err != nil {
-			panic(err)
-		}
-	}()
+func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
+	depayloader := NewH265Depayloader(config.FrameRate)
+	dec := &Decoder{
+		config: &DecoderConfig{
+			Codec: "hevc",
+		},
+	}
 
-	logger.Debugf("Start reception at %s\n", time.Now().Format(time.StampMilli))
+	fr := NewFrameReceiver(logger)
+	dec.config.callback = fr.OnFrameDecoded
+	dec.setupDecoder()
 
-	frameCnt := 0
-	var frameBytes int
 	for {
 		p, a, err := track.ReadRTP()
-
 		if err != nil {
 			logger.Errorf("error reading RTP: %v\n", err)
 			return
 		}
-
-		packetSize := p.MarshalSize()
-		frameBytes += packetSize
 
 		var ecn rtcp.ECN
 		if e, hasECN := a["ECN"]; hasECN {
@@ -156,22 +120,16 @@ func saveToDisk(writer media.Writer, track *webrtc.TrackRemote) {
 			}
 		}
 
-		if p.Header.Marker {
-			frameCnt++
-			// print the time for reception of the frame to stdout and its total size
-			logger.Debugf("Frame %d received marker at %s, size=%d bytes\n",
-				frameCnt, time.Now().Format(time.StampMicro), frameBytes)
-			// reset frame byte counter for next frame
-			frameBytes = 0
+		logger.Debugf("Received RTP Packet seq=%d marker=%t ecn=%v\n",
+			p.SequenceNumber, p.Header.Marker, ecn)
+
+		depayloaded, err := depayloader.WriteRTP(p)
+		if err != nil {
+			logger.Warnf("error writing RTP to file: %v", err)
+			continue
 		}
-
-		logger.Debugf("Received RTP Packet seq=%d marker=%t ecn=%v pkt_size=%d marked_count=%d\n",
-			p.SequenceNumber, p.Header.Marker, ecn, packetSize, frameCnt)
-
-		if err := writer.WriteRTP(p); err != nil {
-			logger.Errorf("error writing RTP to file: %v", err)
-			return
+		if depayloaded != nil {
+			dec.FeedBytes(depayloaded.data, depayloaded.relevantFrame)
 		}
-
 	}
 }

@@ -36,36 +36,33 @@ import (
 	"unsafe"
 )
 
-type Config struct {
-	Codec string
+type DecodedFrame struct {
+	frame    *Frame
+	frameCnt uint32
 }
 
-type transcodingCtx struct {
-	// Conig
-	config *Config
+type FrameDecodedCallback func(decFrame DecodedFrame)
 
-	//params
-	srcW int
-	srcH int
+type DecoderConfig struct {
+	Codec    string
+	callback FrameDecodedCallback
+}
 
-	// decoding
-	decFmt    *FormatContext
-	decStream *Stream
-	decCodec  *CodecContext
-	decPkt    *Packet
-	decFrame  *Frame
-	srcFilter *FilterContext
+type Decoder struct {
+	config *DecoderConfig
 
-	parser *C.AVCodecParserContext
-	// inbuf  *C.uint8_t
+	codecContext *CodecContext
+	parser       *C.AVCodecParserContext
+	packet       *Packet
+	frame        *Frame
+
 	inbuf unsafe.Pointer
 
-	frameCnt int
-
-	f *os.File
+	decodedFrameCnt int
+	f               *os.File
 }
 
-func (ctx *transcodingCtx) setupDecoder() error {
+func (ctx *Decoder) setupDecoder() error {
 	var err error
 
 	codec := FindDecoderByName(ctx.config.Codec)
@@ -74,17 +71,17 @@ func (ctx *transcodingCtx) setupDecoder() error {
 		return fmt.Errorf("codec %s not found", ctx.config.Codec)
 	}
 
-	if ctx.decCodec, err = NewContextWithCodec(codec); err != nil {
+	if ctx.codecContext, err = NewContextWithCodec(codec); err != nil {
 		return fmt.Errorf("NewContextWithCodec: %w", err)
 	}
 
-	if ctx.decCodec, err = NewContextWithCodec(codec); err != nil {
+	if ctx.codecContext, err = NewContextWithCodec(codec); err != nil {
 		return fmt.Errorf("failed to create codec context: %v", err)
 	}
 
 	options := NewDictionary()
 	defer options.Free()
-	if err = ctx.decCodec.OpenWithCodec(codec, options); err != nil {
+	if err = ctx.codecContext.OpenWithCodec(codec, options); err != nil {
 		log.Fatalf("Failed to open decoder: %v\n", err)
 		return err
 	}
@@ -103,48 +100,43 @@ func (ctx *transcodingCtx) setupDecoder() error {
 		// return ErrAllocationError
 	}
 
-	ctx.decPkt, err = NewPacket()
+	ctx.packet, err = NewPacket()
 	if err != nil {
 		panic(err)
 	}
 
-	ctx.decFrame, err = NewFrame()
+	ctx.frame, err = NewFrame()
 	if err != nil {
 		panic(err)
 	}
 
-	ctx.f, err = os.OpenFile("/tmp/video.yuv", os.O_WRONLY, 0600)
-	if err != nil {
-		fmt.Println("could not open the output file")
-		panic(err)
-	}
+	// ctx.f, err = os.OpenFile("/tmp/video.yuv", os.O_WRONLY, 0600)
+	// if err != nil {
+	// 	fmt.Println("could not open the output file")
+	// 	panic(err)
+	// }
 
 	return nil
 }
 
-func (ctx *transcodingCtx) FeedBytes(buff []byte, frameCnt uint32) error {
-
-	fmt.Printf("\n\n\n\n\n")
-	transcoder.PrintHEVCNALs(buff)
+func (ctx *Decoder) FeedBytes(buff []byte, frameCnt uint32) error {
+	// fmt.Printf("Feeding bytes \n\n\n\n\n")
+	// transcoder.PrintHEVCNALs(buff)
 
 	n := len(buff)
 	if n == 0 {
 		return nil
 	}
-	written := 0
 
-	// fmt.Println("Writing ", n, " bytes into buffer ")
 	C.memcpy(ctx.inbuf, unsafe.Pointer(&buff[0]), C.size_t(n))
-
 	start := ctx.inbuf
 
 	for n > 0 {
-
 		var out_data *C.uint8_t
 		var out_size C.int
 
 		lenC := C.av_parser_parse2(
-			ctx.parser, ctx.decCodec.CAVCodecContext,
+			ctx.parser, ctx.codecContext.CAVCodecContext,
 			&out_data, &out_size,
 			(*C.uint8_t)(start), C.int(n),
 			C.AV_NOPTS_VALUE, C.AV_NOPTS_VALUE, 0,
@@ -155,15 +147,13 @@ func (ctx *transcodingCtx) FeedBytes(buff []byte, frameCnt uint32) error {
 
 		start = unsafe.Add(start, lenC)
 		n -= int(lenC)
-		written += int(lenC)
-		// fmt.Printf("consumed %v bytes\n", int(lenC))
 
 		if int(out_size) > 0 {
-			ctx.decPkt.Unref()
-			C.av_new_packet(ctx.decPkt.CAVPacket, out_size)
-			C.memcpy(unsafe.Pointer(ctx.decPkt.CAVPacket.data), unsafe.Pointer(out_data), C.size_t(out_size))
+			ctx.packet.Unref()
+			C.av_new_packet(ctx.packet.CAVPacket, out_size)
+			C.memcpy(unsafe.Pointer(ctx.packet.CAVPacket.data), unsafe.Pointer(out_data), C.size_t(out_size))
 			for {
-				code := int(C.avcodec_send_packet(ctx.decCodec.CAVCodecContext, ctx.decPkt.CAVPacket))
+				code := int(C.avcodec_send_packet(ctx.codecContext.CAVCodecContext, ctx.packet.CAVPacket))
 				if code == 0 {
 					ctx.receiveFrame(frameCnt)
 					break
@@ -186,10 +176,10 @@ func (ctx *transcodingCtx) FeedBytes(buff []byte, frameCnt uint32) error {
 	return nil
 }
 
-func (ctx *transcodingCtx) writeFrameToFFPlay(f *C.AVFrame) {
+func (ctx *Decoder) writeFrameToFFPlay(f *C.AVFrame) {
 
-	w := int(ctx.decFrame.CAVFrame.width)
-	h := int(ctx.decFrame.CAVFrame.height)
+	w := int(ctx.frame.CAVFrame.width)
+	h := int(ctx.frame.CAVFrame.height)
 
 	ySize := w * h
 	uvSize := ySize / 4
@@ -202,24 +192,27 @@ func (ctx *transcodingCtx) writeFrameToFFPlay(f *C.AVFrame) {
 	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[2]), C.int(uvSize)))
 }
 
-func (ctx *transcodingCtx) receiveFrame(cnt uint32) {
+func (ctx *Decoder) receiveFrame(cnt uint32) {
 	for {
-		code := int(C.avcodec_receive_frame(ctx.decCodec.CAVCodecContext, ctx.decFrame.CAVFrame))
+		code := int(C.avcodec_receive_frame(ctx.codecContext.CAVCodecContext, ctx.frame.CAVFrame))
 		if code == 0 {
-
-			ctx.frameCnt++
+			ctx.decodedFrameCnt++
 			fmt.Printf(
 				"decoded frame: %d cnt: %d size: %dx%d pixfmt=%d\n",
-				ctx.frameCnt,
+				ctx.decodedFrameCnt,
 				cnt,
-				ctx.decFrame.CAVFrame.width,
-				ctx.decFrame.CAVFrame.height,
-				ctx.decFrame.CAVFrame.format,
+				ctx.frame.CAVFrame.width,
+				ctx.frame.CAVFrame.height,
+				ctx.frame.CAVFrame.format,
 				// ctx.decFrame.CAVFrame.pts,
 			)
-			ctx.writeFrameToFFPlay(ctx.decFrame.CAVFrame)
-
-			ctx.decFrame.Unref()
+			// ctx.writeFrameToFFPlay(ctx.frame.CAVFrame)
+			decodedFrame := DecodedFrame{
+				frame:    ctx.frame,
+				frameCnt: cnt,
+			}
+			ctx.config.callback(decodedFrame)
+			ctx.frame.Unref()
 			continue
 		}
 
