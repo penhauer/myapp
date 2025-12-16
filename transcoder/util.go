@@ -328,6 +328,16 @@ func FindEncoderByName(name string) *Codec {
 	return NewCodecFromC(unsafe.Pointer(cCodec))
 }
 
+func FindDecoderByName(name string) *Codec {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	cCodec := C.avcodec_find_decoder_by_name(cName)
+	if cCodec == nil {
+		return nil
+	}
+	return NewCodecFromC(unsafe.Pointer(cCodec))
+}
+
 func NewCodecFromC(cCodec unsafe.Pointer) *Codec {
 	return &Codec{CAVCodec: (*C.AVCodec)(cCodec)}
 }

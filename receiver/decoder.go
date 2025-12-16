@@ -38,7 +38,8 @@ import (
 
 type DecodedFrame struct {
 	frame    *Frame
-	frameCnt uint32
+	frameNum uint32
+	ts       uint32
 }
 
 type FrameDecodedCallback func(decFrame DecodedFrame)
@@ -58,7 +59,7 @@ type Decoder struct {
 
 	inbuf unsafe.Pointer
 
-	decodedFrameCnt int
+	decodedFrameNum int
 	f               *os.File
 }
 
@@ -119,7 +120,10 @@ func (ctx *Decoder) setupDecoder() error {
 	return nil
 }
 
-func (ctx *Decoder) FeedBytes(buff []byte, frameCnt uint32) error {
+func (ctx *Decoder) FeedBytes(d *depayloadedUnit) error {
+	buff := d.data
+	frameNum := d.frameNum
+	ts := d.ts
 	// fmt.Printf("Feeding bytes \n\n\n\n\n")
 	// transcoder.PrintHEVCNALs(buff)
 
@@ -155,11 +159,11 @@ func (ctx *Decoder) FeedBytes(buff []byte, frameCnt uint32) error {
 			for {
 				code := int(C.avcodec_send_packet(ctx.codecContext.CAVCodecContext, ctx.packet.CAVPacket))
 				if code == 0 {
-					ctx.receiveFrame(frameCnt)
+					ctx.receiveFrame(frameNum, ts)
 					break
 				}
 				if code == int(transcoder.AVERROR(C.EAGAIN)) {
-					ctx.receiveFrame(frameCnt)
+					ctx.receiveFrame(frameNum, ts)
 					continue
 				}
 
@@ -167,7 +171,7 @@ func (ctx *Decoder) FeedBytes(buff []byte, frameCnt uint32) error {
 					fmt.Printf("avcodec_send_packet failed with code %v", int(code))
 					break
 				} else {
-					ctx.receiveFrame(frameCnt)
+					ctx.receiveFrame(frameNum, ts)
 				}
 
 			}
@@ -192,24 +196,16 @@ func (ctx *Decoder) writeFrameToFFPlay(f *C.AVFrame) {
 	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[2]), C.int(uvSize)))
 }
 
-func (ctx *Decoder) receiveFrame(cnt uint32) {
+func (ctx *Decoder) receiveFrame(frameNum uint32, ts uint32) {
 	for {
 		code := int(C.avcodec_receive_frame(ctx.codecContext.CAVCodecContext, ctx.frame.CAVFrame))
 		if code == 0 {
-			ctx.decodedFrameCnt++
-			fmt.Printf(
-				"decoded frame: %d cnt: %d size: %dx%d pixfmt=%d\n",
-				ctx.decodedFrameCnt,
-				cnt,
-				ctx.frame.CAVFrame.width,
-				ctx.frame.CAVFrame.height,
-				ctx.frame.CAVFrame.format,
-				// ctx.decFrame.CAVFrame.pts,
-			)
+			ctx.decodedFrameNum++
 			// ctx.writeFrameToFFPlay(ctx.frame.CAVFrame)
 			decodedFrame := DecodedFrame{
 				frame:    ctx.frame,
-				frameCnt: cnt,
+				frameNum: frameNum,
+				ts:       ts,
 			}
 			ctx.config.callback(decodedFrame)
 			ctx.frame.Unref()

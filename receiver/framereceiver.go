@@ -1,36 +1,57 @@
 package main
 
 import (
-	"sync/atomic"
 	"time"
 
 	"github.com/pion/logging"
+	"github.com/pion/rtp"
 )
 
-// FrameReceiver handles decoded-frame callbacks and logging.
-// It marks the start of reception on the first decoded frame and
-// logs each frame reception for external analysis.
 type FrameReceiver struct {
-	logger    logging.LeveledLogger
-	startUnix int64 // monotonic start marker in unix nano; 0 means not started
+	logger     logging.LeveledLogger
+	config     *VideoReceiverConfig
+	firstTime  time.Time
+	firstTs    uint32
+	firstTsSet bool
 }
 
-func NewFrameReceiver(logger logging.LeveledLogger) *FrameReceiver {
-	fr := &FrameReceiver{logger: logger}
-	// Reception starts at instantiation time
-	now := time.Now()
-	atomic.StoreInt64(&fr.startUnix, now.UnixNano())
-	fr.logger.Infof("Video started at %s", now.Format(time.StampMilli))
+func NewFrameReceiver(logger logging.LeveledLogger, config *VideoReceiverConfig) *FrameReceiver {
+	fr := &FrameReceiver{
+		logger: logger,
+		config: config,
+	}
 	return fr
 }
 
-// OnFrameDecoded satisfies FrameDecodedCallback.
-// It records the start of reception on first invocation and logs
-// the decoded frame index with a timestamp for downstream analysis.
+func (fr *FrameReceiver) OnRtp(p *rtp.Packet) {
+	if !fr.firstTsSet {
+		fr.firstTs = p.Header.Timestamp
+		fr.firstTime = time.Now()
+		fr.firstTsSet = true
+		fr.logger.Infof(
+			"Received first RTP at: %s ts: %v",
+			fr.firstTime.Format(time.StampMilli),
+			p.Header.Timestamp,
+		)
+	}
+}
+
 func (fr *FrameReceiver) OnFrameDecoded(df DecodedFrame) {
+	now := time.Now()
+	T := 1000 * time.Millisecond
+
+	relativePT := time.Duration(float64((df.frameNum-1)/fr.config.FrameRate) * float64(time.Second))
+	past := now.Sub(fr.firstTime)
+	timeDiff := past - relativePT - T
+
+	tsDiff := past - time.Duration(float64(df.ts-fr.firstTs)/90_000)*time.Second - T
+
 	fr.logger.Infof(
-		"Frame %d received at %s",
-		df.frameCnt,
-		time.Now().Format(time.StampMicro),
+		"Frame %d with ts %d received at %s frameTimeDiff: %v tsDiff: %v",
+		df.frameNum,
+		df.ts,
+		time.Now().Format(time.StampMilli),
+		timeDiff,
+		tsDiff,
 	)
 }

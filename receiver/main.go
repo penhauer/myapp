@@ -102,7 +102,7 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 		},
 	}
 
-	fr := NewFrameReceiver(logger)
+	fr := NewFrameReceiver(logger, config)
 	dec.config.callback = fr.OnFrameDecoded
 	dec.setupDecoder()
 
@@ -112,6 +112,7 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			logger.Errorf("error reading RTP: %v\n", err)
 			return
 		}
+		fr.OnRtp(p)
 
 		var ecn rtcp.ECN
 		if e, hasECN := a["ECN"]; hasECN {
@@ -120,16 +121,16 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			}
 		}
 
-		logger.Debugf("Received RTP Packet seq=%d marker=%t ecn=%v\n",
-			p.SequenceNumber, p.Header.Marker, ecn)
+		logger.Debugf("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
+			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
 
 		depayloaded, err := depayloader.WriteRTP(p)
 		if err != nil {
-			logger.Warnf("error writing RTP to file: %v", err)
+			if err != ErrNoNALUParsed {
+				logger.Warnf("error writing RTP to file: %v", err)
+			}
 			continue
 		}
-		if depayloaded != nil {
-			dec.FeedBytes(depayloaded.data, depayloaded.relevantFrame)
-		}
+		dec.FeedBytes(depayloaded)
 	}
 }

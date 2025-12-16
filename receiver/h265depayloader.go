@@ -1,10 +1,15 @@
 package main
 
 import (
+	"errors"
 	"math"
 
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
+)
+
+var (
+	ErrNoNALUParsed = errors.New("no NALU parsed yet")
 )
 
 // H265Depayloader parses H.265/HEVC RTP packets and returns NALUs
@@ -16,12 +21,13 @@ type H265Depayloader struct {
 	frameRate        uint32
 
 	lastTs   uint32
-	frameCnt uint32
+	frameNum uint32
 }
 
 type depayloadedUnit struct {
-	data          []byte
-	relevantFrame uint32
+	data     []byte
+	frameNum uint32
+	ts       uint32
 }
 
 func NewH265Depayloader(frameRate uint32) *H265Depayloader {
@@ -54,25 +60,18 @@ func (h *H265Depayloader) WriteRTP(packet *rtp.Packet) (*depayloadedUnit, error)
 			h.depacketizer = &codecs.H265Packet{}
 		}
 	} else {
-		h.frameCnt = 1
+		h.frameNum = 1
 		h.lastTs = packet.Header.Timestamp
 	}
 	h.lastSeqNumber = seqNumber
 	h.hasLastSeqNumber = true
-
-	// If we don't have a key frame yet, wait for one
-	// if !h.hasKeyFrame {
-	// 	if h.hasKeyFrame = isKeyFrame(packet.Payload); !h.hasKeyFrame {
-	// 		return nil
-	// 	}
-	// }
 
 	data, err := h.depacketizer.Unmarshal(packet.Payload)
 	if err != nil {
 		return nil, err
 	}
 	if len(data) == 0 {
-		return nil, nil
+		return nil, ErrNoNALUParsed
 	}
 
 	diff := int64(packet.Header.Timestamp) - int64(h.lastTs)
@@ -81,10 +80,11 @@ func (h *H265Depayloader) WriteRTP(packet *rtp.Packet) (*depayloadedUnit, error)
 		diff += 1 << 32
 	}
 	frame_diff := math.Round(float64(diff) / 90000.0 * float64(h.frameRate))
-	h.frameCnt += uint32(frame_diff)
+	h.frameNum += uint32(frame_diff)
 
 	return &depayloadedUnit{
-		data:          data,
-		relevantFrame: h.frameCnt,
+		data:     data,
+		frameNum: h.frameNum,
+		ts:       packet.Header.Timestamp,
 	}, nil
 }
