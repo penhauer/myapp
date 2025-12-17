@@ -29,10 +29,12 @@ import (
 )
 
 import (
+	"container/list"
 	"fmt"
 	"log"
 	"myapp/transcoder"
 	"os"
+	"time"
 	"unsafe"
 )
 
@@ -45,8 +47,9 @@ type DecodedFrame struct {
 type FrameDecodedCallback func(decFrame DecodedFrame)
 
 type DecoderConfig struct {
-	Codec    string
-	callback FrameDecodedCallback
+	Codec     string
+	callback  FrameDecodedCallback
+	FrameRate uint32
 }
 
 type Decoder struct {
@@ -56,6 +59,12 @@ type Decoder struct {
 	parser       *C.AVCodecParserContext
 	packet       *Packet
 	frame        *Frame
+
+	units *list.List
+
+	lastFlush     time.Time
+	flushInterval time.Duration
+	buff          []byte
 
 	inbuf unsafe.Pointer
 
@@ -89,7 +98,7 @@ func (ctx *Decoder) setupDecoder() error {
 
 	ctx.parser = C.av_parser_init(C.AV_CODEC_ID_HEVC)
 
-	size := 100_000_000
+	size := 10_000_000
 	extraSize := C.size_t(C.AVPROBE_PADDING_SIZE)
 
 	max_size := C.size_t(size) + extraSize
@@ -117,22 +126,84 @@ func (ctx *Decoder) setupDecoder() error {
 	// 	panic(err)
 	// }
 
+	ctx.buff = make([]byte, 0, size)
+	ctx.lastFlush = time.Now()
+
+	ctx.units = list.New()
+
+	// Calculate flush interval based on frame rate (in milliseconds)
+	// For example, 30fps = ~33.3ms per frame, use 1.5x the frame duration
+	if ctx.config.FrameRate > 0 {
+		frameDurationMs := time.Duration(1000.0/float64(ctx.config.FrameRate)) * time.Millisecond
+		ctx.flushInterval = time.Duration(float64(frameDurationMs) * 1.5)
+	}
+	log.Printf("Decoder initialized with flush interval: %v (frameRate: %d fps)\n", ctx.flushInterval, ctx.config.FrameRate)
+
 	return nil
 }
 
-func (ctx *Decoder) FeedBytes(d *depayloadedUnit) error {
-	buff := d.data
-	frameNum := d.frameNum
-	ts := d.ts
-	// fmt.Printf("Feeding bytes \n\n\n\n\n")
-	// transcoder.PrintHEVCNALs(buff)
-
-	n := len(buff)
-	if n == 0 {
+func (ctx *Decoder) FeedUnit(d *depayloadedUnit) error {
+	if d.marker {
+		ctx.units.PushBack(d)
+		ctx.initiateFlush("marker bit set")
 		return nil
 	}
 
-	C.memcpy(ctx.inbuf, unsafe.Pointer(&buff[0]), C.size_t(n))
+	if ctx.units.Len() > 0 && ctx.units.Back().Value.(*depayloadedUnit).ts != d.ts {
+		flushReason := "timestamp changed"
+		ctx.initiateFlush(flushReason)
+		ctx.units.PushBack(d)
+		return nil
+	}
+
+	if time.Since(ctx.lastFlush) > ctx.flushInterval {
+		ctx.units.PushBack(d)
+		flushReason := "timeout"
+		ctx.initiateFlush(flushReason)
+		return nil
+	}
+
+	ctx.units.PushBack(d)
+	return nil
+}
+
+func (ctx *Decoder) initiateFlush(flushReason string) {
+	for ctx.checkFlush() {
+	}
+}
+
+func (ctx *Decoder) checkFlush() bool {
+	if ctx.units.Len() == 0 {
+		return false
+	}
+	ctx.buff = ctx.buff[:0]
+	first := ctx.units.Front().Value.(*depayloadedUnit)
+
+	i := 0
+	for ctx.units.Len() > 0 {
+		front := ctx.units.Front()
+		d := front.Value.(*depayloadedUnit)
+		if d.ts != first.ts {
+			break
+		}
+		ctx.units.Remove(front)
+		i++
+		ctx.buff = append(ctx.buff, d.data...)
+	}
+
+	ctx.doFlush(first.frameNum, first.ts)
+	return true
+}
+
+func (ctx *Decoder) doFlush(frameNum uint32, ts uint32) error {
+	in := ctx.buff
+	n := len(in)
+	if n == 0 {
+		ctx.lastFlush = time.Now()
+		return nil
+	}
+
+	C.memcpy(ctx.inbuf, unsafe.Pointer(&in[0]), C.size_t(n))
 	start := ctx.inbuf
 
 	for n > 0 {
@@ -145,6 +216,7 @@ func (ctx *Decoder) FeedBytes(d *depayloadedUnit) error {
 			(*C.uint8_t)(start), C.int(n),
 			C.AV_NOPTS_VALUE, C.AV_NOPTS_VALUE, 0,
 		)
+
 		if int(lenC) < 0 {
 			panic("av_parser_parse2 failed")
 		}
@@ -177,6 +249,9 @@ func (ctx *Decoder) FeedBytes(d *depayloadedUnit) error {
 			}
 		}
 	}
+
+	ctx.lastFlush = time.Now()
+	ctx.buff = ctx.buff[:0]
 	return nil
 }
 
@@ -217,5 +292,4 @@ func (ctx *Decoder) receiveFrame(frameNum uint32, ts uint32) {
 		}
 		panic(fmt.Sprintf("send_packet error %d", code))
 	}
-
 }

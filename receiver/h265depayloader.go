@@ -28,6 +28,7 @@ type depayloadedUnit struct {
 	data     []byte
 	frameNum uint32
 	ts       uint32
+	marker   bool
 }
 
 func NewH265Depayloader(frameRate uint32) *H265Depayloader {
@@ -86,5 +87,6 @@ func (h *H265Depayloader) WriteRTP(packet *rtp.Packet) (*depayloadedUnit, error)
 		data:     data,
 		frameNum: h.frameNum,
 		ts:       packet.Header.Timestamp,
+		marker:   packet.Header.Marker,
 	}, nil
 }

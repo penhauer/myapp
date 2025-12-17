@@ -38,7 +38,7 @@ func (fr *FrameReceiver) OnRtp(p *rtp.Packet) {
 
 func (fr *FrameReceiver) OnFrameDecoded(df DecodedFrame) {
 	now := time.Now()
-	T := 1000 * time.Millisecond
+	T := 500 * time.Millisecond
 
 	relativePT := time.Duration(float64((df.frameNum-1)/fr.config.FrameRate) * float64(time.Second))
 	past := now.Sub(fr.firstTime)
