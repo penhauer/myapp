@@ -38,20 +38,20 @@ func (fr *FrameReceiver) OnRtp(p *rtp.Packet) {
 
 func (fr *FrameReceiver) OnFrameDecoded(df DecodedFrame) {
 	now := time.Now()
-	T := 500 * time.Millisecond
+	T := 0 * time.Millisecond
 
-	relativePT := time.Duration(float64((df.frameNum-1)/fr.config.FrameRate) * float64(time.Second))
+	relativePT := time.Duration(float64(df.frameNum-1) / float64(fr.config.FrameRate) * float64(time.Second))
 	past := now.Sub(fr.firstTime)
 	timeDiff := past - relativePT - T
 
-	tsDiff := past - time.Duration(float64(df.ts-fr.firstTs)/90_000)*time.Second - T
+	tsDiff := past - time.Duration(float64(df.ts-fr.firstTs)/float64(90_000)*float64(time.Second)) - T
 
 	fr.logger.Infof(
 		"Frame %d with ts %d received at %s frameTimeDiff: %v tsDiff: %v",
 		df.frameNum,
 		df.ts,
-		time.Now().Format(time.StampMilli),
-		timeDiff,
-		tsDiff,
+		now.Format(time.StampMilli),
+		timeDiff.Milliseconds(),
+		tsDiff.Milliseconds(),
 	)
 }

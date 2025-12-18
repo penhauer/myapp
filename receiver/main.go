@@ -140,7 +140,6 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			continue
 		}
 		decodingChan <- depayloaded
-		logger.Infof("Pushed to decodingChan, channel size: %d/%d\n", len(decodingChan), cap(decodingChan))
 	}
 }
 

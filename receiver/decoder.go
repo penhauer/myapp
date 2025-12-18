@@ -131,12 +131,8 @@ func (ctx *Decoder) setupDecoder() error {
 
 	ctx.units = list.New()
 
-	// Calculate flush interval based on frame rate (in milliseconds)
-	// For example, 30fps = ~33.3ms per frame, use 1.5x the frame duration
-	if ctx.config.FrameRate > 0 {
-		frameDurationMs := time.Duration(1000.0/float64(ctx.config.FrameRate)) * time.Millisecond
-		ctx.flushInterval = time.Duration(float64(frameDurationMs) * 1.5)
-	}
+	frameDuration := time.Duration(1000.0/float64(ctx.config.FrameRate)) * time.Millisecond
+	ctx.flushInterval = time.Duration(float64(frameDuration) * 1.5)
 	log.Printf("Decoder initialized with flush interval: %v (frameRate: %d fps)\n", ctx.flushInterval, ctx.config.FrameRate)
 
 	return nil
