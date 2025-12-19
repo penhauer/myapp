@@ -253,7 +253,7 @@ func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, ssrc uint32) {
 	ec := ss.config.EncoderConfig
 	streamingDuration := *ss.config.Duration
-	tickDuration := time.Millisecond * time.Duration(1000/(*ec.FrameRate))
+	tickDuration := time.Duration(float64(time.Second) / float64(*ec.FrameRate))
 	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
 

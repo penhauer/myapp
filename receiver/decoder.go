@@ -39,9 +39,8 @@ import (
 )
 
 type DecodedFrame struct {
-	frame    *Frame
-	frameNum uint32
-	ts       uint32
+	frame *Frame
+	ts    uint32
 }
 
 type FrameDecodedCallback func(decFrame DecodedFrame)
@@ -95,6 +94,8 @@ func (ctx *Decoder) setupDecoder() error {
 		log.Fatalf("Failed to open decoder: %v\n", err)
 		return err
 	}
+	ctx.codecContext.CAVCodecContext.pkt_timebase = C.AVRational{num: 1, den: 90000}
+	ctx.codecContext.CAVCodecContext.flags |= C.AV_CODEC_FLAG_LOW_DELAY
 
 	ctx.parser = C.av_parser_init(C.AV_CODEC_ID_HEVC)
 
@@ -141,21 +142,19 @@ func (ctx *Decoder) setupDecoder() error {
 func (ctx *Decoder) FeedUnit(d *depayloadedUnit) error {
 	if d.marker {
 		ctx.units.PushBack(d)
-		ctx.initiateFlush("marker bit set")
+		ctx.initiateFlush()
 		return nil
 	}
 
 	if ctx.units.Len() > 0 && ctx.units.Back().Value.(*depayloadedUnit).ts != d.ts {
-		flushReason := "timestamp changed"
-		ctx.initiateFlush(flushReason)
+		ctx.initiateFlush()
 		ctx.units.PushBack(d)
 		return nil
 	}
 
 	if time.Since(ctx.lastFlush) > ctx.flushInterval {
 		ctx.units.PushBack(d)
-		flushReason := "timeout"
-		ctx.initiateFlush(flushReason)
+		ctx.initiateFlush()
 		return nil
 	}
 
@@ -163,7 +162,7 @@ func (ctx *Decoder) FeedUnit(d *depayloadedUnit) error {
 	return nil
 }
 
-func (ctx *Decoder) initiateFlush(flushReason string) {
+func (ctx *Decoder) initiateFlush() {
 	for ctx.checkFlush() {
 	}
 }
@@ -175,7 +174,6 @@ func (ctx *Decoder) checkFlush() bool {
 	ctx.buff = ctx.buff[:0]
 	first := ctx.units.Front().Value.(*depayloadedUnit)
 
-	i := 0
 	for ctx.units.Len() > 0 {
 		front := ctx.units.Front()
 		d := front.Value.(*depayloadedUnit)
@@ -183,7 +181,6 @@ func (ctx *Decoder) checkFlush() bool {
 			break
 		}
 		ctx.units.Remove(front)
-		i++
 		ctx.buff = append(ctx.buff, d.data...)
 	}
 
@@ -192,6 +189,9 @@ func (ctx *Decoder) checkFlush() bool {
 }
 
 func (ctx *Decoder) doFlush(frameNum uint32, ts uint32) error {
+	// fmt.Printf("\n\n\n\n\n printing nals for %d and %d\n", frameNum, ts)
+	// transcoder.PrintHEVCNALs(ctx.buff)
+
 	in := ctx.buff
 	n := len(in)
 	if n == 0 {
@@ -224,14 +224,16 @@ func (ctx *Decoder) doFlush(frameNum uint32, ts uint32) error {
 			ctx.packet.Unref()
 			C.av_new_packet(ctx.packet.CAVPacket, out_size)
 			C.memcpy(unsafe.Pointer(ctx.packet.CAVPacket.data), unsafe.Pointer(out_data), C.size_t(out_size))
+			ctx.packet.SetPTS(int64(ts))
+			ctx.packet.SetDTS(int64(ts))
 			for {
 				code := int(C.avcodec_send_packet(ctx.codecContext.CAVCodecContext, ctx.packet.CAVPacket))
 				if code == 0 {
-					ctx.receiveFrame(frameNum, ts)
+					ctx.receiveFrame()
 					break
 				}
 				if code == int(transcoder.AVERROR(C.EAGAIN)) {
-					ctx.receiveFrame(frameNum, ts)
+					ctx.receiveFrame()
 					continue
 				}
 
@@ -239,7 +241,7 @@ func (ctx *Decoder) doFlush(frameNum uint32, ts uint32) error {
 					fmt.Printf("avcodec_send_packet failed with code %v", int(code))
 					break
 				} else {
-					ctx.receiveFrame(frameNum, ts)
+					ctx.receiveFrame()
 				}
 
 			}
@@ -267,16 +269,14 @@ func (ctx *Decoder) writeFrameToFFPlay(f *C.AVFrame) {
 	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[2]), C.int(uvSize)))
 }
 
-func (ctx *Decoder) receiveFrame(frameNum uint32, ts uint32) {
+func (ctx *Decoder) receiveFrame() {
 	for {
 		code := int(C.avcodec_receive_frame(ctx.codecContext.CAVCodecContext, ctx.frame.CAVFrame))
 		if code == 0 {
-			ctx.decodedFrameNum++
 			// ctx.writeFrameToFFPlay(ctx.frame.CAVFrame)
 			decodedFrame := DecodedFrame{
-				frame:    ctx.frame,
-				frameNum: frameNum,
-				ts:       ts,
+				frame: ctx.frame,
+				ts:    uint32(ctx.frame.CAVFrame.pts),
 			}
 			ctx.config.callback(decodedFrame)
 			ctx.frame.Unref()

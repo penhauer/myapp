@@ -98,7 +98,8 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	depayloader := NewH265Depayloader(config.FrameRate)
 	dec := &Decoder{
 		config: &DecoderConfig{
-			Codec:     "hevc_cuvid",
+			// Codec: "hevc", // CPU hecv decoder
+			Codec:     "hevc_cuvid", // NVIDIA GPU hevc decoder
 			FrameRate: config.FrameRate,
 		},
 	}
@@ -107,11 +108,8 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	dec.config.callback = fr.OnFrameDecoded
 	dec.setupDecoder()
 
-	// Create a channel to send depayloaded bytes to the decoder
 	decodingChan := make(chan *depayloadedUnit, 100)
 	defer close(decodingChan)
-
-	// Start decoder goroutine
 	go decoderRoutine(dec, decodingChan)
 
 	for {
@@ -129,7 +127,7 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			}
 		}
 
-		logger.Debugf("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
+		logger.Infof("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
 			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
 
 		depayloaded, err := depayloader.WriteRTP(p)
@@ -143,7 +141,6 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	}
 }
 
-// decoderRoutine runs the decoder in a separate goroutine
 func decoderRoutine(dec *Decoder, decodingChan <-chan *depayloadedUnit) {
 	for depayloaded := range decodingChan {
 		dec.FeedUnit(depayloaded)

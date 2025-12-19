@@ -378,6 +378,22 @@ type Packet struct {
 	CAVPacket *C.AVPacket
 }
 
+func (pkt *Packet) PTS() int64 {
+	return int64(pkt.CAVPacket.pts)
+}
+
+func (pkt *Packet) SetPTS(pts int64) {
+	pkt.CAVPacket.pts = (C.int64_t)(pts)
+}
+
+func (pkt *Packet) DTS() int64 {
+	return int64(pkt.CAVPacket.dts)
+}
+
+func (pkt *Packet) SetDTS(dts int64) {
+	pkt.CAVPacket.dts = (C.int64_t)(dts)
+}
+
 func (pkt *Packet) Size() int {
 	return int(pkt.CAVPacket.size)
 }
