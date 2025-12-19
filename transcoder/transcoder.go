@@ -413,9 +413,11 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 			// dropF := func() {
 			// 	ctx.droppedFrames += 1
 			// }
-			// saveF := func() {
-			// 	ctx.rawOutputFile.Write(frameBytes)
-			// }
+			saveF := func() {
+				ctx.rawOutputFile.Write(frameBytes)
+			}
+
+			saveF()
 
 			// if len(frameBytes) > 0 {
 			// 	if ctx.realFrameCnt >= 60 && keyFrame {
