@@ -5,18 +5,41 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 )
 
-type VideoReceiverConfig struct {
-	AnswerAddress string `json:"answer_address"`
-	OfferAddress  string `json:"offer_address"`
-	OutputDir     string `json:"output_dir"`
-	FrameRate     uint32 `json:"frame_rate"`
+type CCAType string
 
-	// ConfigDir is set to the directory containing the config file.
-	// It is not read from JSON.
-	ConfigDir string `json:"-"`
+const (
+	CCAUnknown CCAType = ""
+	GCC        CCAType = "gcc"
+	SCREAM     CCAType = "scream"
+)
+
+func (c CCAType) String() string { return string(c) }
+
+// UnmarshalJSON validates that the input is a known CCA value.
+func (c *CCAType) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	s = strings.ToLower(s)
+	switch s {
+	case "", string(GCC), string(SCREAM):
+		*c = CCAType(s)
+		return nil
+	default:
+		return fmt.Errorf("unknown CCA value %q", s)
+	}
+}
+
+type VideoReceiverConfig struct {
+	AnswerAddress string  `json:"answer_address"`
+	OfferAddress  string  `json:"offer_address"`
+	OutputDir     string  `json:"output_dir"`
+	FrameRate     uint32  `json:"frame_rate"`
+	CCA           CCAType `json:"cca"`
 }
 
 func readReceiverConfigFile() (*VideoReceiverConfig, error) {
@@ -35,12 +58,6 @@ func readReceiverConfigFile() (*VideoReceiverConfig, error) {
 	cfg := &VideoReceiverConfig{}
 	if err := json.Unmarshal(b, cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file %s: %w", *configPath, err)
-	}
-
-	// Set ConfigDir to the directory containing the config file for downstream users.
-	cfg.ConfigDir = filepath.Dir(*configPath)
-	if cfg.OutputDir == "" {
-		cfg.OutputDir = "."
 	}
 
 	return cfg, nil

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/scream"
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
@@ -24,7 +25,7 @@ func main() {
 		panic(err)
 	}
 
-	mediaEngine, interceptorRegistry, err := registerInterceptors()
+	mediaEngine, interceptorRegistry, err := registerInterceptors(receiverConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -59,15 +60,28 @@ func main() {
 	panic(http.ListenAndServe(receiverConfig.AnswerAddress, nil))
 }
 
-func registerInterceptors() (*webrtc.MediaEngine, *interceptor.Registry, error) {
+func registerInterceptors(config *VideoReceiverConfig) (*webrtc.MediaEngine, *interceptor.Registry, error) {
 	interceptorRegistry := &interceptor.Registry{}
 	mediaEngine := &webrtc.MediaEngine{}
 	if err := mediaEngine.RegisterDefaultCodecs(); err != nil {
 		return nil, nil, err
 	}
 
-	if err := webrtc.ConfigureCongestionControlFeedback(mediaEngine, interceptorRegistry); err != nil {
-		return nil, nil, err
+	switch config.CCA {
+	case GCC:
+		if err := webrtc.ConfigureCongestionControlFeedback(mediaEngine, interceptorRegistry); err != nil {
+			return nil, nil, err
+		}
+	case SCREAM:
+		mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeVideo)
+		mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeAudio)
+		generator, err := scream.NewReceiverInterceptor()
+		if err != nil {
+			return nil, nil, err
+		}
+		interceptorRegistry.Add(generator)
+	default:
+		panic("Unsupported CCA")
 	}
 
 	return mediaEngine, interceptorRegistry, nil
@@ -82,7 +96,8 @@ func setup_logger() logging.LeveledLogger {
 
 func handle_video(peerConnection *webrtc.PeerConnection, config *VideoReceiverConfig) {
 	if err := os.MkdirAll(config.OutputDir, 0755); err != nil {
-		panic(err)
+		fmt.Println("Failed to create output dir")
+		os.Exit(1)
 	}
 
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) { //nolint: revive
@@ -127,7 +142,7 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			}
 		}
 
-		logger.Infof("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
+		logger.Debugf("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
 			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
 
 		depayloaded, err := depayloader.WriteRTP(p)

@@ -2,5 +2,6 @@
     "offer_address": "127.0.0.1:50000",
     "answer_address": "127.0.0.1:60000",
     "output_dir": "/home/amirmo/testbed/video/ecn-pion/streaming/output",
-    "frame_rate": 30
+    "frame_rate": 30,
+    "cca": "gcc"
 }
