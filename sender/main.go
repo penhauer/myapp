@@ -39,7 +39,9 @@ type sessionSetup struct {
 	peerConnection      *webrtc.PeerConnection
 
 	estimatorChan chan bitrateEstimator
+	esChan        chan any
 	estimator     bitrateEstimator
+	es            any
 
 	fsCtx *transcoder.FrameServingContext
 }
@@ -125,13 +127,14 @@ func registerInterceptors(s *sessionSetup) error {
 		return err
 	}
 
-	check_encoder_config(s)
-	initialBitrate := *s.config.EncoderConfig.InitialBitrate
 	s.estimatorChan = make(chan bitrateEstimator, 1)
+	s.esChan = make(chan any, 1)
 	switch s.config.CCA {
 	case GCC:
 		ccInterceptor, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
-			return gcc.NewSendSideBWE(gcc.SendSideBWEInitialBitrate(initialBitrate))
+			return gcc.NewSendSideBWE(
+				gcc.SendSideBWEInitialBitrate(*s.config.GCC.InitialBitrate),
+			)
 		})
 		if err != nil {
 			return err
@@ -142,12 +145,15 @@ func registerInterceptors(s *sessionSetup) error {
 				return estimator.GetTargetBitrate()
 			}
 			s.estimatorChan <- f
+			s.esChan <- estimator
 		})
 		s.interceptorRegistry.Add(ccInterceptor)
 	case SCREAM:
+		s.mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeVideo)
+		s.mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeAudio)
 		screamInterceptor, err := scream.NewSenderInterceptor(
-			scream.InitialBitrate(float64(initialBitrate)),
-			scream.IsL4S(true),
+			scream.InitialBitrate(float64(*s.config.Scream.InitialBitrate)),
+			scream.IsL4S(s.config.Scream.IsL4S),
 		)
 		if err != nil {
 			return err
@@ -161,25 +167,12 @@ func registerInterceptors(s *sessionSetup) error {
 				return bitrate
 			}
 			s.estimatorChan <- f
+			s.esChan <- estimator
 		})
 		s.interceptorRegistry.Add(screamInterceptor)
 	}
 
 	return nil
-}
-
-func check_encoder_config(ss *sessionSetup) {
-	initialBitrate := &ss.config.EncoderConfig.InitialBitrate
-	if *initialBitrate == nil {
-		*initialBitrate = intptr(2_500_000)
-		ss.logger.Warn("Initial bitrate not set. Using 2500000 as the default value")
-	}
-
-	frameRate := &ss.config.EncoderConfig.FrameRate
-	if *frameRate == nil {
-		*frameRate = intptr(30)
-		ss.logger.Warn("Framerate not set. Using 30 as the default value")
-	}
 }
 
 func handle_video(ss *sessionSetup) {
@@ -197,14 +190,11 @@ func handle_video(ss *sessionSetup) {
 	}
 
 	rtpSender, err := ss.peerConnection.AddTrack(videoTrack)
-	ssrc := uint32(rtpSender.GetParameters().Encodings[0].SSRC)
-
-	check_encoder_config(ss)
-	configure_transcoder(ss, ssrc)
-
 	if err != nil {
 		panic(err)
 	}
+	ssrc := uint32(rtpSender.GetParameters().Encodings[0].SSRC)
+	configure_transcoder(ss, ssrc)
 
 	go func() {
 		// Read incoming RTCP packets
@@ -222,6 +212,7 @@ func handle_video(ss *sessionSetup) {
 func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 	ec := ss.config.EncoderConfig
 	ss.estimator = <-ss.estimatorChan
+	ss.es = <-ss.esChan
 
 	var keyFrameCallback transcoder.KeyFrameCallbackType = nil
 	if ss.config.EncoderConfig.AdaptiveBitrate {
@@ -257,7 +248,7 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, s
 	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
 
-	start := time.Now()
+	// start := time.Now()
 	var fcnt int
 	var done <-chan time.Time
 	var sizeSum int = 0
@@ -271,7 +262,7 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, s
 		case <-ticker.C:
 			fcnt++
 
-			targetBitrate := ss.estimator(ssrc)
+			// targetBitrate := ss.estimator(ssrc)
 			frame := ss.fsCtx.GetNextFrame()
 
 			sizeSum += len(frame.Data)
@@ -280,20 +271,25 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, s
 				ss.logger.Infof("Keyframe seen. sizeSumBits=%d lastSetBitrate=%d diff=%v\n", sizeSum*8, lastSetBitrate, diff)
 				lastSetBitrate = frame.Bitrate
 				sizeSum = 0
+
+				if val, ok := ss.es.(scream.BandwidthEstimator); ok {
+					// fmt.Printf("%+v\n", val.GetStats())
+					fmt.Printf("%v\n\n\n", val.GetStatsString())
+				}
 			}
 
 			if len(frame.Data) == 0 {
 				continue
 			}
 
-			elapsed := time.Since(start)
-			ss.logger.Infof("elapsed=%v target bitrate=%d frame_bitrate= %d frame_size_bits=%d fcnt=%d \n",
-				elapsed,
-				targetBitrate,
-				frame.Bitrate,
-				len(frame.Data)*8,
-				fcnt,
-			)
+			// elapsed := time.Since(start)
+			// ss.logger.Infof("elapsed=%v target bitrate=%d frame_bitrate= %d frame_size_bits=%d fcnt=%d \n",
+			// 	elapsed,
+			// 	targetBitrate,
+			// 	frame.Bitrate,
+			// 	len(frame.Data)*8,
+			// 	fcnt,
+			// )
 			if err := videoTrack.WriteSample(media.Sample{Data: frame.Data, Duration: tickDuration}); err != nil {
 				panic(err)
 			}

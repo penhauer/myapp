@@ -3,12 +3,19 @@
     "answer_address": "10.0.0.1:60000",
     "output_dir": "/home/amirmo/testbed/video/ecn-pion/streaming/output",
     "video": "/home/amirmo/testbed/video/ecn-pion/video_generator/video_files/4.y4m",
-    "duration": 30,
-    "cca": "gcc",
+    "duration": 120,
+    "cca": "scream",
     "encoder": {
         "frame_rate": 30,
         "initial_bitrate": 2500000,
         "adaptive_bitrate": true,
-        "loop_video": false
+        "loop_video": true
+    },
+    "gcc": {
+        "initial_bitrate": 2500000
+    },
+    "scream": {
+        "initial_bitrate": 2500000,
+        "isL4s": false
     }
 }

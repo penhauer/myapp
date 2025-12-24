@@ -43,7 +43,9 @@ type VideoSenderConfig struct {
 	Video         *string       `json:"video"`
 	Duration      *int          `json:"duration"`
 	EncoderConfig EncoderConfig `json:"encoder"`
-	CCA           CCAType       `json:"CCA"`
+	CCA           CCAType       `json:"cca"`
+	GCC           *GCCConfig    `json:"gcc"`
+	Scream        *ScreamConfig `json:"scream"`
 }
 
 type EncoderConfig struct {
@@ -51,6 +53,15 @@ type EncoderConfig struct {
 	InitialBitrate  *int `json:"initial_bitrate"`
 	AdaptiveBitrate bool `json:"adaptive_bitrate"`
 	LoopVideo       bool `json:"loop_video"`
+}
+
+type GCCConfig struct {
+	InitialBitrate *int `json:"initial_bitrate"`
+}
+
+type ScreamConfig struct {
+	InitialBitrate *int `json:"initial_bitrate"`
+	IsL4S          bool `json:"isL4s"`
 }
 
 func readSenderConfigFile() (*VideoSenderConfig, error) {

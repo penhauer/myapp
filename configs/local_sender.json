@@ -4,11 +4,18 @@
     "output_dir": "/home/amirmo/testbed/video/ecn-pion/streaming/output",
     "video": "/home/amirmo/testbed/video/ecn-pion/video_generator/video_files/4.y4m",
     "duration": 30,
-    "cca": "scream",
+    "cca": "gcc",
     "encoder": {
         "frame_rate": 30,
         "initial_bitrate": 2500000,
-        "adaptive_bitrate": false,
-        "loop_video": true
+        "adaptive_bitrate": true,
+        "loop_video": false
+    },
+    "gcc": {
+        "initial_bitrate": 2500000
+    },
+    "scream": {
+        "initial_bitrate": 2500000,
+        "isL4s": true
     }
 }
