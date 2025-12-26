@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"math"
 
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
@@ -25,10 +24,10 @@ type H265Depayloader struct {
 }
 
 type depayloadedUnit struct {
-	data     []byte
-	frameNum uint32
-	ts       uint32
-	marker   bool
+	data []byte
+	// frameNum uint32
+	ts     uint32
+	marker bool
 }
 
 func NewH265Depayloader(frameRate uint32) *H265Depayloader {
@@ -60,9 +59,6 @@ func (h *H265Depayloader) WriteRTP(packet *rtp.Packet) (*depayloadedUnit, error)
 			// Packet loss detected: reset depacketizer to drop any in-flight fragmented NALU
 			h.depacketizer = &codecs.H265Packet{}
 		}
-	} else {
-		h.frameNum = 1
-		h.lastTs = packet.Header.Timestamp
 	}
 	h.lastSeqNumber = seqNumber
 	h.hasLastSeqNumber = true
@@ -75,18 +71,9 @@ func (h *H265Depayloader) WriteRTP(packet *rtp.Packet) (*depayloadedUnit, error)
 		return nil, ErrNoNALUParsed
 	}
 
-	diff := int64(packet.Header.Timestamp) - int64(h.lastTs)
-	h.lastTs = packet.Header.Timestamp
-	if diff < 0 {
-		diff += 1 << 32
-	}
-	frame_diff := math.Round(float64(diff) / 90000.0 * float64(h.frameRate))
-	h.frameNum += uint32(frame_diff)
-
 	return &depayloadedUnit{
-		data:     data,
-		frameNum: h.frameNum,
-		ts:       packet.Header.Timestamp,
-		marker:   packet.Header.Marker,
+		data:   data,
+		ts:     packet.Header.Timestamp,
+		marker: packet.Header.Marker,
 	}, nil
 }

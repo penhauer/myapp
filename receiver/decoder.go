@@ -38,17 +38,19 @@ import (
 	"unsafe"
 )
 
-type DecodedFrame struct {
-	frame *Frame
-	ts    uint32
-}
+// type DecodedFrame struct {
+// 	frame *Frame
+// 	ts    uint32
+// }
 
-type FrameDecodedCallback func(decFrame DecodedFrame)
+// type FrameDecodedCallback func(decFrame DecodedFrame)
 
 type DecoderConfig struct {
-	Codec     string
-	callback  FrameDecodedCallback
+	Codec string
+	// callback  FrameDecodedCallback
 	FrameRate uint32
+	tracker   *RtpTracker
+	logger    *log.Logger
 }
 
 type Decoder struct {
@@ -67,56 +69,59 @@ type Decoder struct {
 
 	inbuf unsafe.Pointer
 
-	decodedFrameNum int
-	f               *os.File
+	f *os.File
 }
 
-func (ctx *Decoder) setupDecoder() error {
+func NewDecoder(config *DecoderConfig) (*Decoder, error) {
+	d := &Decoder{
+		config: config,
+	}
+
 	var err error
 
-	codec := FindDecoderByName(ctx.config.Codec)
+	codec := FindDecoderByName(d.config.Codec)
 	if codec == nil {
-		log.Fatalf("Could not find codec %s", ctx.config.Codec)
-		return fmt.Errorf("codec %s not found", ctx.config.Codec)
+		log.Fatalf("Could not find codec %s", d.config.Codec)
+		return nil, fmt.Errorf("codec %s not found", d.config.Codec)
 	}
 
-	if ctx.codecContext, err = NewContextWithCodec(codec); err != nil {
-		return fmt.Errorf("NewContextWithCodec: %w", err)
+	if d.codecContext, err = NewContextWithCodec(codec); err != nil {
+		return nil, fmt.Errorf("NewContextWithCodec: %w", err)
 	}
 
-	if ctx.codecContext, err = NewContextWithCodec(codec); err != nil {
-		return fmt.Errorf("failed to create codec context: %v", err)
+	if d.codecContext, err = NewContextWithCodec(codec); err != nil {
+		return nil, fmt.Errorf("failed to create codec context: %v", err)
 	}
 
 	options := NewDictionary()
 	defer options.Free()
-	if err = ctx.codecContext.OpenWithCodec(codec, options); err != nil {
+	if err = d.codecContext.OpenWithCodec(codec, options); err != nil {
 		log.Fatalf("Failed to open decoder: %v\n", err)
-		return err
+		return nil, err
 	}
-	ctx.codecContext.CAVCodecContext.pkt_timebase = C.AVRational{num: 1, den: 90000}
-	ctx.codecContext.CAVCodecContext.flags |= C.AV_CODEC_FLAG_LOW_DELAY
+	d.codecContext.CAVCodecContext.pkt_timebase = C.AVRational{num: 1, den: 90000}
+	d.codecContext.CAVCodecContext.flags |= C.AV_CODEC_FLAG_LOW_DELAY
 
-	ctx.parser = C.av_parser_init(C.AV_CODEC_ID_HEVC)
+	d.parser = C.av_parser_init(C.AV_CODEC_ID_HEVC)
 
 	size := 10_000_000
 	extraSize := C.size_t(C.AVPROBE_PADDING_SIZE)
 
 	max_size := C.size_t(size) + extraSize
-	ctx.inbuf = C.av_malloc(max_size)
-	C.memset(unsafe.Add(ctx.inbuf, size), 0, extraSize)
+	d.inbuf = C.av_malloc(max_size)
+	C.memset(unsafe.Add(d.inbuf, size), 0, extraSize)
 
-	if ctx.inbuf == nil {
+	if d.inbuf == nil {
 		panic("failed to allocate memory for input buffer")
 		// return ErrAllocationError
 	}
 
-	ctx.packet, err = NewPacket()
+	d.packet, err = NewPacket()
 	if err != nil {
 		panic(err)
 	}
 
-	ctx.frame, err = NewFrame()
+	d.frame, err = NewFrame()
 	if err != nil {
 		panic(err)
 	}
@@ -127,16 +132,16 @@ func (ctx *Decoder) setupDecoder() error {
 	// 	panic(err)
 	// }
 
-	ctx.buff = make([]byte, 0, size)
-	ctx.lastFlush = time.Now()
+	d.buff = make([]byte, 0, size)
+	d.lastFlush = time.Now()
 
-	ctx.units = list.New()
+	d.units = list.New()
 
-	frameDuration := time.Duration(1000.0/float64(ctx.config.FrameRate)) * time.Millisecond
-	ctx.flushInterval = time.Duration(float64(frameDuration) * 1.5)
-	log.Printf("Decoder initialized with flush interval: %v (frameRate: %d fps)\n", ctx.flushInterval, ctx.config.FrameRate)
+	frameDuration := time.Duration(1000.0/float64(d.config.FrameRate)) * time.Millisecond
+	d.flushInterval = time.Duration(float64(frameDuration) * 1.5)
+	log.Printf("Decoder initialized with flush interval: %v (frameRate: %d fps)\n", d.flushInterval, d.config.FrameRate)
 
-	return nil
+	return d, nil
 }
 
 func (ctx *Decoder) FeedUnit(d *depayloadedUnit) error {
@@ -184,13 +189,16 @@ func (ctx *Decoder) checkFlush() bool {
 		ctx.buff = append(ctx.buff, d.data...)
 	}
 
-	ctx.doFlush(first.frameNum, first.ts)
+	ctx.doFlush(first.ts)
 	return true
 }
 
-func (ctx *Decoder) doFlush(frameNum uint32, ts uint32) error {
+func (ctx *Decoder) doFlush(ts uint32) error {
 	// fmt.Printf("\n\n\n\n\n printing nals for %d and %d\n", frameNum, ts)
 	// transcoder.PrintHEVCNALs(ctx.buff)
+
+	frameNum, _, tsDiff := ctx.config.tracker.GetDiff(ts)
+	logger.Infof("Starting to feed frame %v to decoder. tsDiff: %v\n", frameNum, tsDiff.Milliseconds())
 
 	in := ctx.buff
 	n := len(in)
@@ -274,11 +282,27 @@ func (ctx *Decoder) receiveFrame() {
 		code := int(C.avcodec_receive_frame(ctx.codecContext.CAVCodecContext, ctx.frame.CAVFrame))
 		if code == 0 {
 			// ctx.writeFrameToFFPlay(ctx.frame.CAVFrame)
-			decodedFrame := DecodedFrame{
-				frame: ctx.frame,
-				ts:    uint32(ctx.frame.CAVFrame.pts),
-			}
-			ctx.config.callback(decodedFrame)
+			// decodedFrame := DecodedFrame{
+			// 	frame: ctx.frame,
+			// 	ts:    uint32(ctx.frame.CAVFrame.pts),
+			// }
+
+			ts := uint32(ctx.frame.CAVFrame.pts)
+			now := time.Now()
+			frameNum, timeDiff, tsDiff := ctx.config.tracker.GetDiff(ts)
+
+			fmt.Printf("frame format: %v\n", ctx.frame.CAVFrame.format)
+
+			logger.Infof(
+				"Frame %d with ts %d received at %s frameTimeDiff: %v tsDiff: %v",
+				frameNum,
+				ts,
+				now.Format(time.StampMilli),
+				timeDiff.Milliseconds(),
+				tsDiff.Milliseconds(),
+			)
+
+			// ctx.config.callback(decodedFrame)
 			ctx.frame.Unref()
 			continue
 		}

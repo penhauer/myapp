@@ -111,17 +111,18 @@ func handle_video(peerConnection *webrtc.PeerConnection, config *VideoReceiverCo
 
 func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	depayloader := NewH265Depayloader(config.FrameRate)
-	dec := &Decoder{
-		config: &DecoderConfig{
+	tracker := NewRtpTracker(logger, config)
+	dec, err := NewDecoder(
+		&DecoderConfig{
 			// Codec: "hevc", // CPU hecv decoder
 			Codec:     "hevc_cuvid", // NVIDIA GPU hevc decoder
 			FrameRate: config.FrameRate,
+			tracker:   tracker,
 		},
+	)
+	if err != nil {
+		panic(err)
 	}
-
-	fr := NewFrameReceiver(logger, config)
-	dec.config.callback = fr.OnFrameDecoded
-	dec.setupDecoder()
 
 	decodingChan := make(chan *depayloadedUnit, 100)
 	defer close(decodingChan)
@@ -133,7 +134,8 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			logger.Errorf("error reading RTP: %v\n", err)
 			return
 		}
-		fr.OnRtp(p)
+		tracker.OnRtp(p)
+		// fr.OnRtp(p)
 
 		var ecn rtcp.ECN
 		if e, hasECN := a["ECN"]; hasECN {
@@ -144,6 +146,11 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 
 		logger.Debugf("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
 			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
+
+		if p.Marker {
+			frameNum, _, tsDiff := tracker.GetDiff(p.Timestamp)
+			logger.Infof("Last RTP Packet of frame %d was received at %v\n", frameNum, tsDiff.Milliseconds())
+		}
 
 		depayloaded, err := depayloader.WriteRTP(p)
 		if err != nil {
