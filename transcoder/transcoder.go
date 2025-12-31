@@ -28,18 +28,23 @@ import (
 )
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"unsafe"
 )
 
 type KeyFrameCallbackType func() int
 
-var FRAME_BUFFER = 30
-var LOOKAHEAD = 2
+var (
+	FRAME_BUFFER = 30
+	LOOKAHEAD    = 2
+	logger       = slog.Default()
+)
 
 type Config struct {
 	Codec            string
@@ -53,6 +58,7 @@ type Config struct {
 	EncoderFrameRate int
 	OutputPath       string
 	RawOutputPath    string
+	LogLevel         slog.Level // Log level for transcoder (e.g., slog.LevelDebug, slog.LevelInfo)
 }
 
 type EncoderFrame struct {
@@ -122,6 +128,7 @@ func setupDecoder(ctx *transcodingCtx) error {
 	options := NewDictionary()
 	defer options.Free()
 
+	// only for yuv
 	options.Set("pixel_format", "yuv420p10le")
 	options.Set("video_size", "3840x2160")
 
@@ -298,19 +305,17 @@ func decodeStream(ctx *transcodingCtx) bool {
 		log.Fatalf("Failed to read packet: %v\n", err)
 	}
 	if !read {
-		// debug
-		fmt.Printf(
-			"Decoder format context read no frame. Last read frame: %d (%d)\n",
-			ctx.decFrameCnt,
-			ctx.decTrueFrameCnt,
-		)
+		logger.Debug("Decoder format context read no frame",
+			"lastFrameCount", ctx.decFrameCnt,
+			"trueFrameCount", ctx.decTrueFrameCnt)
 	}
 	if read {
 		ctx.decFrameCnt += 1
 		ctx.decTrueFrameCnt += 1
 
-		// debug
-		fmt.Printf("Retrieved frame %d (%d) from decoder's format context\n", ctx.decFrameCnt, ctx.decTrueFrameCnt)
+		logger.Debug("Retrieved frame from decoder's format context",
+			"frameCount", ctx.decFrameCnt,
+			"trueFrameCount", ctx.decTrueFrameCnt)
 	}
 
 	defer ctx.decPkt.Unref()
@@ -338,23 +343,20 @@ func decodeStream(ctx *transcodingCtx) bool {
 
 		code = C.avcodec_receive_frame(ctx.decCodec.CAVCodecContext, cFrame)
 		if code == C.AVERROR_EOF {
-			// debug
-			fmt.Println("receive_frame returned AVERROR_EOF when: ", ctx.decFrameCnt)
+			logger.Debug("receive_frame returned AVERROR_EOF",
+				"frameCount", ctx.decFrameCnt)
 			return ctx.handleReadingStopped()
 		}
 		if code == AVERROR(C.EAGAIN) {
-			// debug (print suitable debug)
+			logger.Debug("Decoder needs more input packets (EAGAIN)")
 			break
 		} else if int(code) < 0 {
 			log.Fatal("error when receiving frame in the decoder")
 			return false
 		}
 
-		// if log level is Debug
-		// printRawFrameHash(ctx, frame)
-
-		if ret := C.av_frame_make_writable(ctx.swNV12.CAVFrame); ret < 0 {
-			panic("make_writable swNV12")
+		if logger.Enabled(context.TODO(), slog.LevelDebug) {
+			printRawFrameHash(ctx, frame)
 		}
 
 		C.sws_scale(ctx.swsCtx,
@@ -392,7 +394,10 @@ func printRawFrameHash(ctx *transcodingCtx, frame *Frame) {
 
 	hash := md5.Sum(buf.Bytes())
 	md5String := hex.EncodeToString(hash[:])
-	fmt.Printf("Frame %d (%d) MD5: %s\n", ctx.decFrameCnt, ctx.decTrueFrameCnt, md5String)
+	logger.Debug("Frame MD5",
+		"frameCount", ctx.decFrameCnt,
+		"trueFrameCount", ctx.decTrueFrameCnt,
+		"md5", md5String)
 }
 
 func (ctx *transcodingCtx) handleReadingStopped() bool {
@@ -455,22 +460,18 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 
 	push := func(pts int) {
 		if len(data) == 0 {
-			// debug
-			fmt.Printf("Skipped pushing access unit with size 0. last access unit: %d encoder frame: %d\n",
-				ctx.pktFrameCnt,
-				ctx.frameCnt,
-			)
+			logger.Debug("Skipped pushing empty access unit",
+				"lastAccessUnit", ctx.pktFrameCnt,
+				"encoderFrame", ctx.frameCnt)
 			return
 		}
 		ctx.pktFrameCnt += 1
 
-		// debug (print suitable debug)
-		fmt.Printf("pushing access unit: %d pts: %d size: %d encoder frame: %d\n",
-			ctx.pktFrameCnt,
-			pts,
-			len(data),
-			ctx.frameCnt,
-		)
+		logger.Debug("Pushing access unit",
+			"accessUnit", ctx.pktFrameCnt,
+			"pts", pts,
+			"size", len(data),
+			"encoderFrame", ctx.frameCnt)
 
 		// An encoded frame (access unit) has been detected
 		ef := &EncoderFrame{
@@ -487,8 +488,7 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 		ret := ctx.encCodec.GetPacket(ctx.encPkt)
 		if ret == int(AVERROR(C.EAGAIN)) {
 
-			// debug (print suitable debug)
-			fmt.Println("EAGAIN")
+			logger.Debug("Encoder needs more frames (EAGAIN)")
 			break
 		} else if ret == 0 {
 			ctx.encPkt.SetStreamIndex(ctx.encStream.Index())
@@ -547,14 +547,12 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 			ctx.encPkt.Unref()
 		} else if ret == int(C.AVERROR_EOF) {
 
-			// debug (print suitable debug)
-			fmt.Println("EOF")
+			logger.Debug("Encoder reached EOF")
 			eofSeen = true
 			break
 		} else {
 
-			// debug (print suitable debug)
-			fmt.Println("ERROR")
+			logger.Debug("Encoder error receiving packet", "returnCode", ret)
 			break
 		}
 	}
@@ -581,8 +579,7 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 		if !ctx.config.LoopVideo {
 			close(ctx.encFrameChan)
 		} else {
-			// debug
-			fmt.Println("Flushing encoder's buffer")
+			logger.Debug("Flushing encoder's buffer for video loop")
 			C.avcodec_flush_buffers(ctx.encCodec.CAVCodecContext)
 		}
 	}
@@ -590,6 +587,11 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 
 func AVERROR(e int) C.int {
 	return -C.int(e)
+}
+
+// SetLogLevel configures the package logger with the specified level
+func SetLogLevel(level slog.Level) {
+	logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
 func setup(ctx *transcodingCtx) error {
@@ -615,6 +617,11 @@ type FrameServingContext struct {
 }
 
 func (fsCtx *FrameServingContext) Init(ctx *Config) {
+	// Configure logger if log level is set
+	if ctx.LogLevel != 0 {
+		SetLogLevel(ctx.LogLevel)
+	}
+
 	tctx := &transcodingCtx{
 		config:       ctx,
 		nextKeyFrame: -1,
@@ -638,8 +645,7 @@ func (fsCtx *FrameServingContext) GetNextFrame() *EncoderFrame {
 		return ef
 	}
 
-	// debug
-	fmt.Println("Encoding has ended")
+	logger.Debug("Encoding has ended")
 	return &EncoderFrame{
 		Data: nil,
 	}
