@@ -27,6 +27,9 @@ import (
 	"C"
 )
 import (
+	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -35,6 +38,7 @@ import (
 
 type KeyFrameCallbackType func() int
 
+var FRAME_BUFFER = 30
 var LOOKAHEAD = 2
 
 type Config struct {
@@ -77,6 +81,9 @@ type transcodingCtx struct {
 	decFrame  *Frame
 	srcFilter *FilterContext
 
+	decFrameCnt     int
+	decTrueFrameCnt int
+
 	// encoding
 	encFmt     *FormatContext
 	encStream  *Stream
@@ -87,10 +94,12 @@ type transcodingCtx struct {
 	sinkFilter *FilterContext
 
 	// frames
-	frameChan    chan *Frame
+	decFrameChan chan *Frame
+	encFrameChan chan *EncoderFrame
 	frameCnt     int
 	nextKeyFrame int
 	frameBitrate int
+	pktFrameCnt  int
 
 	realFrameCnt  int
 	droppedFrames int
@@ -112,6 +121,9 @@ func setupDecoder(ctx *transcodingCtx) error {
 
 	options := NewDictionary()
 	defer options.Free()
+
+	options.Set("pixel_format", "yuv420p10le")
+	options.Set("video_size", "3840x2160")
 
 	if err := ctx.decFmt.OpenInput(ctx.config.InputFile, nil, options); err != nil {
 		return fmt.Errorf("failed to open input file: %v", err)
@@ -281,40 +293,65 @@ func decodeStream(ctx *transcodingCtx) bool {
 		println("unable to allocate new packet for decoding")
 	}
 
-	reading, err := ctx.decFmt.ReadFrame(ctx.decPkt)
+	read, err := ctx.decFmt.ReadFrame(ctx.decPkt)
 	if err != nil {
 		log.Fatalf("Failed to read packet: %v\n", err)
 	}
-	if !reading {
-		return ctx.handleReadingStopped()
+	if !read {
+		// debug
+		fmt.Printf(
+			"Decoder format context read no frame. Last read frame: %d (%d)\n",
+			ctx.decFrameCnt,
+			ctx.decTrueFrameCnt,
+		)
 	}
+	if read {
+		ctx.decFrameCnt += 1
+		ctx.decTrueFrameCnt += 1
+
+		// debug
+		fmt.Printf("Retrieved frame %d (%d) from decoder's format context\n", ctx.decFrameCnt, ctx.decTrueFrameCnt)
+	}
+
 	defer ctx.decPkt.Unref()
 
-	if ctx.decPkt.StreamIndex() != ctx.decStream.Index() {
-		return true
+	var code C.int
+	if read {
+		if ctx.decPkt.StreamIndex() != ctx.decStream.Index() {
+			return true
+		}
+		ctx.decPkt.RescaleTime(ctx.decStream.TimeBase(), ctx.decCodec.TimeBase())
+		cPkt := (*C.AVPacket)(unsafe.Pointer(ctx.decPkt.CAVPacket))
+		code = C.avcodec_send_packet(ctx.decCodec.CAVCodecContext, cPkt)
+	} else {
+		code = C.avcodec_send_packet(ctx.decCodec.CAVCodecContext, nil)
 	}
-	ctx.decPkt.RescaleTime(ctx.decStream.TimeBase(), ctx.decCodec.TimeBase())
 
-	pkt := ctx.decPkt
-
-	cPkt := (*C.AVPacket)(unsafe.Pointer(pkt.CAVPacket))
-	code := C.avcodec_send_packet(ctx.decCodec.CAVCodecContext, cPkt)
 	if int(code) < 0 {
 		log.Fatal("error when sending packet to codec")
 		return false
 	}
 
-	for int(code) >= 0 {
+	for {
 		frame := ctx.decFrame
 		cFrame := (*C.AVFrame)(unsafe.Pointer(frame.CAVFrame))
 
 		code = C.avcodec_receive_frame(ctx.decCodec.CAVCodecContext, cFrame)
-		if code == AVERROR(C.EAGAIN) || code == C.AVERROR_EOF {
+		if code == C.AVERROR_EOF {
+			// debug
+			fmt.Println("receive_frame returned AVERROR_EOF when: ", ctx.decFrameCnt)
+			return ctx.handleReadingStopped()
+		}
+		if code == AVERROR(C.EAGAIN) {
+			// debug (print suitable debug)
 			break
 		} else if int(code) < 0 {
 			log.Fatal("error when receiving frame in the decoder")
 			return false
 		}
+
+		// if log level is Debug
+		// printRawFrameHash(ctx, frame)
 
 		if ret := C.av_frame_make_writable(ctx.swNV12.CAVFrame); ret < 0 {
 			panic("make_writable swNV12")
@@ -326,23 +363,41 @@ func decodeStream(ctx *transcodingCtx) bool {
 			(**C.uint8_t)(&ctx.swNV12.CAVFrame.data[0]), (*C.int)(&ctx.swNV12.CAVFrame.linesize[0]),
 		)
 
-		hwFrame, _ := NewFrame()
+		hwFrame, err := NewFrame()
+		if err != nil {
+			panic(err)
+		}
 		if int(C.av_hwframe_get_buffer(ctx.hwframeCtx, hwFrame.CAVFrame, 0)) < 0 {
 			panic("sadfasdf")
 		}
 		if int(C.av_hwframe_transfer_data(hwFrame.CAVFrame, ctx.swNV12.CAVFrame, 0)) < 0 {
 			panic("pashm")
 		}
-		ctx.frameChan <- hwFrame
+
+		ctx.decFrameChan <- hwFrame
 
 		frame.Unref()
 	}
 	return true
 }
 
+func printRawFrameHash(ctx *transcodingCtx, frame *Frame) {
+	var buf bytes.Buffer
+	for i := 0; i < int(frame.CAVFrame.height); i++ {
+		lineSize := int(frame.CAVFrame.linesize[0])
+		dataPtr := unsafe.Pointer(uintptr(unsafe.Pointer(frame.CAVFrame.data[0])) + uintptr(i*lineSize))
+		lineData := C.GoBytes(dataPtr, C.int(frame.CAVFrame.width*2)) // width*2 for 10-bit YUV420P10LE
+		buf.Write(lineData)
+	}
+
+	hash := md5.Sum(buf.Bytes())
+	md5String := hex.EncodeToString(hash[:])
+	fmt.Printf("Frame %d (%d) MD5: %s\n", ctx.decFrameCnt, ctx.decTrueFrameCnt, md5String)
+}
+
 func (ctx *transcodingCtx) handleReadingStopped() bool {
 	if !ctx.config.LoopVideo {
-		close(ctx.frameChan)
+		close(ctx.decFrameChan)
 		return false
 	}
 
@@ -353,6 +408,10 @@ func (ctx *transcodingCtx) handleReadingStopped() bool {
 func (ctx *transcodingCtx) restartPlayback() {
 	C.av_seek_frame(ctx.decFmt.CAVFormatContext, C.int(ctx.decStream.CAVStream.index), 0, C.AVSEEK_FLAG_BACKWARD)
 	C.avcodec_flush_buffers(ctx.decCodec.CAVCodecContext)
+
+	ctx.decTrueFrameCnt = 0
+	// Send a nil packet so the encoder's buffer is drained
+	ctx.decFrameChan <- nil
 }
 
 func getPacketBytes(p *Packet) []byte {
@@ -360,17 +419,14 @@ func getPacketBytes(p *Packet) []byte {
 	return frameBytes
 }
 
-func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
+func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 	var data []byte
 	var err error
 
-	frame, ok := <-ctx.frameChan
-	if !ok {
-		frame = nil
-	} else {
-		frame.CAVFrame.pts = C.long(ctx.frameCnt)
+	if frame != nil {
+		frame.CAVFrame.pts = C.int64_t(ctx.frameCnt)
+		ctx.frameCnt += 1
 	}
-	ctx.frameCnt += 1
 
 	if ctx.frameCnt+LOOKAHEAD == ctx.nextKeyFrame && ctx.config.KeyFrameCallback != nil {
 		bitrate := ctx.config.KeyFrameCallback()
@@ -379,11 +435,11 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 
 	err = ctx.encCodec.FeedFrame(frame)
 	if err != nil {
-		err = fmt.Errorf("error in feedframe %v", err)
-		return false, nil, err
+		fmt.Printf("error in feedframe %v", err)
+		return
 	}
 
-	if ok {
+	if frame != nil {
 		frame.Free()
 	}
 
@@ -393,16 +449,58 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 		}
 	}
 	keyFrame := false
+	eofSeen := false
+	// countGotten := 0
+	lastPts := -1
+
+	push := func(pts int) {
+		if len(data) == 0 {
+			// debug
+			fmt.Printf("Skipped pushing access unit with size 0. last access unit: %d encoder frame: %d\n",
+				ctx.pktFrameCnt,
+				ctx.frameCnt,
+			)
+			return
+		}
+		ctx.pktFrameCnt += 1
+
+		// debug (print suitable debug)
+		fmt.Printf("pushing access unit: %d pts: %d size: %d encoder frame: %d\n",
+			ctx.pktFrameCnt,
+			pts,
+			len(data),
+			ctx.frameCnt,
+		)
+
+		// An encoded frame (access unit) has been detected
+		ef := &EncoderFrame{
+			KeyFrame: keyFrame,
+			Data:     data,
+			Bitrate:  ctx.frameBitrate,
+		}
+		ctx.encFrameChan <- ef
+		keyFrame = false
+		data = nil
+	}
+
 	for {
 		ret := ctx.encCodec.GetPacket(ctx.encPkt)
 		if ret == int(AVERROR(C.EAGAIN)) {
+
+			// debug (print suitable debug)
+			fmt.Println("EAGAIN")
 			break
 		} else if ret == 0 {
 			ctx.encPkt.SetStreamIndex(ctx.encStream.Index())
 			ctx.encPkt.RescaleTime(ctx.encCodec.TimeBase(), ctx.encStream.TimeBase())
 
-			frameBytes := getPacketBytes(ctx.encPkt)
+			pktPts := int(ctx.encPkt.CAVPacket.pts)
+			if lastPts != -1 && pktPts != lastPts {
+				push(pktPts)
+			}
+			lastPts = pktPts
 
+			frameBytes := getPacketBytes(ctx.encPkt)
 			isKeyFrame := ctx.encPkt.CAVPacket.flags & C.AV_PKT_FLAG_KEY
 			if isKeyFrame != 0 {
 				ctx.nextKeyFrame = ctx.frameCnt + ctx.config.GoPSize
@@ -434,21 +532,34 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 			// 	}
 			// 	ctx.realFrameCnt += 1
 			// }
+
+			// this invalidates the encPkt.pts so future references to encPkt.pts should be forbidden
 			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
 
+			// countGotten += 1
+			// fmt.Printf("frame: %v countGotten: %d  pts: %d\n", ctx.frameCnt, countGotten, pktPts)
+
+			// debug
 			// fmt.Printf("frame: %v \n", ctx.frameCnt)
 			// PrintHEVCNALs(frameBytes)
-			data = append(data, frameBytes...)
 
+			data = append(data, frameBytes...)
 			ctx.encPkt.Unref()
 		} else if ret == int(C.AVERROR_EOF) {
+
+			// debug (print suitable debug)
+			fmt.Println("EOF")
+			eofSeen = true
 			break
 		} else {
+
+			// debug (print suitable debug)
+			fmt.Println("ERROR")
 			break
 		}
 	}
 
-	if !ok {
+	if done {
 		ctx.rawOutputFile.Close()
 		// fmt.Printf("Total frames: %v   dropped: %v   saved: %v\n", ctx.realFrameCnt, ctx.droppedFrames, ctx.realFrameCnt-ctx.droppedFrames)
 
@@ -463,12 +574,18 @@ func encodeStream(ctx *transcodingCtx) (bool, *EncoderFrame, error) {
 		C.avformat_free_context(ctx.encFmt.CAVFormatContext)
 	}
 
-	done := !ok
-	return done, &EncoderFrame{
-		KeyFrame: keyFrame,
-		Data:     data,
-		Bitrate:  ctx.frameBitrate,
-	}, nil
+	// use lastPts instead of using
+	push(lastPts)
+
+	if eofSeen {
+		if !ctx.config.LoopVideo {
+			close(ctx.encFrameChan)
+		} else {
+			// debug
+			fmt.Println("Flushing encoder's buffer")
+			C.avcodec_flush_buffers(ctx.encCodec.CAVCodecContext)
+		}
+	}
 }
 
 func AVERROR(e int) C.int {
@@ -476,8 +593,14 @@ func AVERROR(e int) C.int {
 }
 
 func setup(ctx *transcodingCtx) error {
-	ctx.frameChan = make(chan *Frame, 1000)
+	ctx.decFrameChan = make(chan *Frame, FRAME_BUFFER)
+	ctx.encFrameChan = make(chan *EncoderFrame, FRAME_BUFFER)
+
 	ctx.frameCnt = 0
+	ctx.pktFrameCnt = 0
+	ctx.decFrameCnt = 0
+	ctx.decTrueFrameCnt = 0
+
 	if err := setupDecoder(ctx); err != nil {
 		return err
 	}
@@ -489,27 +612,6 @@ func setup(ctx *transcodingCtx) error {
 
 type FrameServingContext struct {
 	transcodingCtx *transcodingCtx
-
-	bufferGap     int
-	decodingEnded bool
-	encodingEnded bool
-
-	encChan chan int
-
-	frameCnt       int
-	frameSizes     int
-	lastSetBitrate int
-}
-
-func (fsCtx *FrameServingContext) startDecoding() {
-	for {
-		for len(fsCtx.transcodingCtx.frameChan) < fsCtx.bufferGap && !fsCtx.decodingEnded {
-			if !decodeStream(fsCtx.transcodingCtx) {
-				fsCtx.decodingEnded = true
-			}
-		}
-		<-fsCtx.encChan
-	}
 }
 
 func (fsCtx *FrameServingContext) Init(ctx *Config) {
@@ -520,40 +622,41 @@ func (fsCtx *FrameServingContext) Init(ctx *Config) {
 
 	fsCtx.transcodingCtx = tctx
 	fsCtx.transcodingCtx.rawOutputFile, _ = os.Create(ctx.RawOutputPath)
-	fsCtx.bufferGap = 10
 	if err := setup(fsCtx.transcodingCtx); err != nil {
 		panic(err)
 	}
 
-	fsCtx.encChan = make(chan int, fsCtx.bufferGap+1)
-	go fsCtx.startDecoding()
-
-	// consume decoded frames that produce no encoded frames
-	for i := 0; i < LOOKAHEAD; i++ {
-		frame := fsCtx.GetNextFrame()
-		if len(frame.Data) != 0 {
-			panic("non empty buffer returned from a lookahead frame")
-		}
-	}
-	fsCtx.frameCnt = 0
+	go decodingRoutine(fsCtx.transcodingCtx)
+	go encodeRoutine(fsCtx.transcodingCtx)
 }
 
 func (fsCtx *FrameServingContext) GetNextFrame() *EncoderFrame {
-	if fsCtx.encodingEnded {
-		return &EncoderFrame{
-			Data: nil,
+	for ef := range fsCtx.transcodingCtx.encFrameChan {
+		if len(ef.Data) == 0 {
+			continue
+		}
+		return ef
+	}
+
+	// debug
+	fmt.Println("Encoding has ended")
+	return &EncoderFrame{
+		Data: nil,
+	}
+}
+
+func decodingRoutine(ctx *transcodingCtx) {
+	for {
+		running := decodeStream(ctx)
+		if !running {
+			break
 		}
 	}
+}
 
-	fsCtx.frameCnt++
-	done, frame, err := encodeStream(fsCtx.transcodingCtx)
-	if err != nil {
-		panic("encoder returned error (handle later)")
+func encodeRoutine(ctx *transcodingCtx) {
+	for frame := range ctx.decFrameChan {
+		encodeFrame(ctx, frame, false)
 	}
-	fsCtx.encChan <- 1
-	if done {
-		fsCtx.encodingEnded = true
-	}
-
-	return frame
+	encodeFrame(ctx, nil, true)
 }
