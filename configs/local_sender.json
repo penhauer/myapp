@@ -9,7 +9,9 @@
         "frame_rate": 30,
         "initial_bitrate": 2500000,
         "adaptive_bitrate": true,
-        "loop_video": false
+        "loop_video": false,
+        "mp4_output_file": "encoded.mp4",
+        "hevc_output_file": "encoded.hevc"
     },
     "gcc": {
         "initial_bitrate": 2500000

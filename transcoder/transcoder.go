@@ -56,9 +56,12 @@ type Config struct {
 	GoPSize          int
 	LoopVideo        bool
 	EncoderFrameRate int
-	OutputPath       string
-	RawOutputPath    string
 	LogLevel         slog.Level // Log level for transcoder (e.g., slog.LevelDebug, slog.LevelInfo)
+	MP4OutputFile    string
+	HEVCOutputFile   string
+
+	saveHEVC bool
+	saveMP4  bool
 }
 
 type EncoderFrame struct {
@@ -68,7 +71,6 @@ type EncoderFrame struct {
 }
 
 type transcodingCtx struct {
-
 	// Conig
 	config *Config
 
@@ -76,8 +78,7 @@ type transcodingCtx struct {
 	srcW int
 	srcH int
 
-	// todo: remove later
-	rawOutputFile *os.File
+	hevcFile *os.File
 
 	// decoding
 	decFmt    *FormatContext
@@ -107,6 +108,7 @@ type transcodingCtx struct {
 	frameBitrate int
 	pktFrameCnt  int
 
+	// for debugging (todo: remove later)
 	realFrameCnt  int
 	droppedFrames int
 
@@ -264,13 +266,15 @@ func setupEncoder(ctx *transcodingCtx) error {
 		return fmt.Errorf("OpenWithCodec: %w", err)
 	}
 
-	// --- 7) Muxer: IVF with AV1 (works fine)
 	ctx.encFmt = &FormatContext{}
-	if C.avformat_alloc_output_context2(&ctx.encFmt.CAVFormatContext, nil, C.CString("mp4"), C.CString(ctx.config.OutputPath)) < 0 {
+	if C.avformat_alloc_output_context2(&ctx.encFmt.CAVFormatContext, nil, C.CString("mp4"), C.CString(ctx.config.MP4OutputFile)) < 0 {
 		return fmt.Errorf("alloc_output_context2 failed")
 	}
-	if C.avio_open(&ctx.encFmt.CAVFormatContext.pb, C.CString(ctx.config.OutputPath), C.AVIO_FLAG_WRITE) < 0 {
-		return fmt.Errorf("avio_open failed")
+
+	if ctx.config.saveMP4 {
+		if C.avio_open(&ctx.encFmt.CAVFormatContext.pb, C.CString(ctx.config.MP4OutputFile), C.AVIO_FLAG_WRITE) < 0 {
+			return fmt.Errorf("avio_open failed")
+		}
 	}
 
 	// New stream
@@ -284,10 +288,12 @@ func setupEncoder(ctx *transcodingCtx) error {
 	ctx.encStream.TimeBase().SetNumerator(ctx.encCodec.TimeBase().Numerator())
 	ctx.encStream.SetAverageFrameRate(ctx.encCodec.FrameRate())
 
-	C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString(ctx.config.OutputPath), 1)
+	if ctx.config.saveMP4 {
+		C.av_dump_format(ctx.encFmt.CAVFormatContext, 0, C.CString(ctx.config.MP4OutputFile), 1)
 
-	if C.avformat_write_header(ctx.encFmt.CAVFormatContext, nil) < 0 {
-		return fmt.Errorf("avformat_write_header failed")
+		if C.avformat_write_header(ctx.encFmt.CAVFormatContext, nil) < 0 {
+			return fmt.Errorf("avformat_write_header failed")
+		}
 	}
 
 	return nil
@@ -512,7 +518,9 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 			// 	ctx.droppedFrames += 1
 			// }
 			saveF := func() {
-				ctx.rawOutputFile.Write(frameBytes)
+				if ctx.config.saveHEVC {
+					ctx.hevcFile.Write(frameBytes)
+				}
 			}
 
 			saveF()
@@ -534,7 +542,9 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 			// }
 
 			// this invalidates the encPkt.pts so future references to encPkt.pts should be forbidden
-			C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
+			if ctx.config.saveMP4 {
+				C.av_interleaved_write_frame(ctx.encFmt.CAVFormatContext, ctx.encPkt.CAVPacket)
+			}
 
 			// countGotten += 1
 			// fmt.Printf("frame: %v countGotten: %d  pts: %d\n", ctx.frameCnt, countGotten, pktPts)
@@ -558,18 +568,19 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 	}
 
 	if done {
-		ctx.rawOutputFile.Close()
-		// fmt.Printf("Total frames: %v   dropped: %v   saved: %v\n", ctx.realFrameCnt, ctx.droppedFrames, ctx.realFrameCnt-ctx.droppedFrames)
-
-		C.av_write_trailer(ctx.encFmt.CAVFormatContext)
-
-		// Close the output file handle
-		if ctx.encFmt.CAVFormatContext.pb != nil {
-			C.avio_closep(&ctx.encFmt.CAVFormatContext.pb)
+		if ctx.config.saveHEVC {
+			ctx.hevcFile.Close()
 		}
 
-		// Free the format context
-		C.avformat_free_context(ctx.encFmt.CAVFormatContext)
+		if ctx.config.saveMP4 {
+			C.av_write_trailer(ctx.encFmt.CAVFormatContext)
+
+			if ctx.encFmt.CAVFormatContext.pb != nil {
+				C.avio_closep(&ctx.encFmt.CAVFormatContext.pb)
+			}
+
+			C.avformat_free_context(ctx.encFmt.CAVFormatContext)
+		}
 	}
 
 	// use lastPts instead of using
@@ -603,6 +614,14 @@ func setup(ctx *transcodingCtx) error {
 	ctx.decFrameCnt = 0
 	ctx.decTrueFrameCnt = 0
 
+	if ctx.config.saveHEVC {
+		var err error
+		ctx.hevcFile, err = os.Create(ctx.config.HEVCOutputFile)
+		if err != nil {
+			return err
+		}
+	}
+
 	if err := setupDecoder(ctx); err != nil {
 		return err
 	}
@@ -613,32 +632,38 @@ func setup(ctx *transcodingCtx) error {
 }
 
 type FrameServingContext struct {
-	transcodingCtx *transcodingCtx
+	tCtx *transcodingCtx
 }
 
-func (fsCtx *FrameServingContext) Init(ctx *Config) {
+func (fsCtx *FrameServingContext) Init(cfg *Config) {
 	// Configure logger if log level is set
-	if ctx.LogLevel != 0 {
-		SetLogLevel(ctx.LogLevel)
+	if cfg.LogLevel != 0 {
+		SetLogLevel(cfg.LogLevel)
+	}
+
+	if cfg.HEVCOutputFile != "" {
+		cfg.saveHEVC = true
+	}
+	if cfg.MP4OutputFile != "" {
+		cfg.saveMP4 = true
 	}
 
 	tctx := &transcodingCtx{
-		config:       ctx,
+		config:       cfg,
 		nextKeyFrame: -1,
 	}
+	fsCtx.tCtx = tctx
 
-	fsCtx.transcodingCtx = tctx
-	fsCtx.transcodingCtx.rawOutputFile, _ = os.Create(ctx.RawOutputPath)
-	if err := setup(fsCtx.transcodingCtx); err != nil {
+	if err := setup(tctx); err != nil {
 		panic(err)
 	}
 
-	go decodingRoutine(fsCtx.transcodingCtx)
-	go encodeRoutine(fsCtx.transcodingCtx)
+	go decodingRoutine(fsCtx.tCtx)
+	go encodeRoutine(fsCtx.tCtx)
 }
 
 func (fsCtx *FrameServingContext) GetNextFrame() *EncoderFrame {
-	for ef := range fsCtx.transcodingCtx.encFrameChan {
+	for ef := range fsCtx.tCtx.encFrameChan {
 		if len(ef.Data) == 0 {
 			continue
 		}

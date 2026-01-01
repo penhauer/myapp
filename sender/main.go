@@ -223,6 +223,14 @@ func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 		}
 	}
 
+	var mp4OutputFile, hevcOutputFile string
+	if ec.MP4OutputFile != nil && *ec.MP4OutputFile != "" {
+		mp4OutputFile = filepath.Join(ss.config.OutputDir, *ec.MP4OutputFile)
+	}
+	if ec.HEVCOutputFile != nil && *ec.HEVCOutputFile != "" {
+		hevcOutputFile = filepath.Join(ss.config.OutputDir, *ec.HEVCOutputFile)
+	}
+
 	ctx := &transcoder.Config{
 		Codec:            "hevc_nvenc",
 		TargetW:          3840,
@@ -233,8 +241,8 @@ func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 		GoPSize:          30,
 		EncoderFrameRate: *ec.FrameRate, // whether we send the frames with this frame rate is not a business of the encoder
 		KeyFrameCallback: keyFrameCallback,
-		OutputPath:       filepath.Join(ss.config.OutputDir, "encoded.mp4"),
-		RawOutputPath:    filepath.Join(ss.config.OutputDir, "encoded.hevc"),
+		MP4OutputFile:    mp4OutputFile,
+		HEVCOutputFile:   hevcOutputFile,
 	}
 
 	ss.fsCtx = &transcoder.FrameServingContext{}

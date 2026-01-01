@@ -49,10 +49,12 @@ type VideoSenderConfig struct {
 }
 
 type EncoderConfig struct {
-	FrameRate       *int `json:"frame_rate"`
-	InitialBitrate  *int `json:"initial_bitrate"`
-	AdaptiveBitrate bool `json:"adaptive_bitrate"`
-	LoopVideo       bool `json:"loop_video"`
+	FrameRate       *int    `json:"frame_rate"`
+	InitialBitrate  *int    `json:"initial_bitrate"`
+	AdaptiveBitrate bool    `json:"adaptive_bitrate"`
+	LoopVideo       bool    `json:"loop_video"`
+	MP4OutputFile   *string `json:"mp4_output_file"`
+	HEVCOutputFile  *string `json:"hevc_output_file"`
 }
 
 type GCCConfig struct {
