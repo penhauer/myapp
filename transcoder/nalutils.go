@@ -4,15 +4,17 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+
+	"github.com/pion/webrtc/v4/pkg/media/h265reader"
 )
 
-// hevcNalType extracts the 6-bit HEVC NAL unit type from the first header byte.
-// For HEVC: type = (b0 & 0x7E) >> 1. Returns -1 if too short.
-func hevcNalType(nal []byte) int {
+// HevcNalType extracts the 6-bit HEVC NAL unit type from the first header byte.
+// For HEVC: type = (b0 & 0x7E) >> 1. Returns 0 if too short.
+func HevcNalType(nal []byte) h265reader.NalUnitType {
 	if len(nal) < 2 {
-		return -1
+		return 0
 	}
-	return int((nal[0] & 0x7E) >> 1)
+	return h265reader.NalUnitType((nal[0] & 0x7E) >> 1)
 }
 
 // isAnnexBStart checks for 00 00 01 or 00 00 00 01 at pos i.
@@ -26,8 +28,8 @@ func isAnnexBStart(b []byte, i int) (start int, ok bool, skip int) {
 	return 0, false, 0
 }
 
-// splitAnnexB returns NAL payloads (without start codes) and their byte ranges.
-func splitAnnexB(b []byte) (nals [][]byte, ranges [][2]int) {
+// SplitAnnexB returns NAL payloads (without start codes) and their byte ranges.
+func SplitAnnexB(b []byte) (nals [][]byte, ranges [][2]int) {
 	i := 0
 	for i < len(b) {
 		// find next start code
@@ -56,54 +58,14 @@ func splitAnnexB(b []byte) (nals [][]byte, ranges [][2]int) {
 	return
 }
 
-// detectLengthSize tries 4,3,2-byte length prefixes (HVCC) and returns the size if plausible.
-func detectLengthSize(b []byte) int {
-	for _, n := range []int{4, 3, 2} {
-		if len(b) <= n {
-			continue
-		}
-		// read first length
-		L := 0
-		for i := 0; i < n; i++ {
-			L = (L << 8) | int(b[i])
-		}
-		if L > 0 && n+L <= len(b) {
-			return n
-		}
-	}
-	return 0
-}
-
-// splitHVCC splits length-prefixed HVCC payload into NALs and byte ranges (payload only).
-func splitHVCC(b []byte, n int) (nals [][]byte, ranges [][2]int, err error) {
-	i := 0
-	for i+n <= len(b) {
-		L := 0
-		for k := 0; k < n; k++ {
-			L = (L << 8) | int(b[i+k])
-		}
-		i += n
-		if L <= 0 || i+L > len(b) {
-			return nil, nil, fmt.Errorf("bad HVCC length at %d (len=%d)", i-n, L)
-		}
-		nals = append(nals, b[i:i+L])
-		ranges = append(ranges, [2]int{i, i + L})
-		i += L
-	}
-	if i != len(b) {
-		return nil, nil, fmt.Errorf("trailing bytes after HVCC parse")
-	}
-	return nals, ranges, nil
-}
-
 // PrintHEVCNALs detects framing (Annex-B vs HVCC), splits, and prints info for each NAL.
 func PrintHEVCNALs(buf []byte) error {
 	// Fast path: Annex-B?
 	if len(buf) >= 4 && (buf[0] == 0 && buf[1] == 0 && (buf[2] == 1 || (buf[2] == 0 && buf[3] == 1))) {
-		nals, ranges := splitAnnexB(buf)
+		nals, ranges := SplitAnnexB(buf)
 		fmt.Printf("Total range: bytes[0..%d)\n", len(buf))
 		for idx, nal := range nals {
-			typ := hevcNalType(nal)
+			typ := int(HevcNalType(nal))
 			r := ranges[idx]
 			prev := hex.EncodeToString(nal[:min(8, len(nal))])
 			fmt.Printf("#%d  type=%-2d  bytes=[%d..%d)  preview=%s\n", idx, typ, r[0], r[1], prev)
@@ -124,20 +86,15 @@ func PrintHEVCNALs(buf []byte) error {
 		return nil
 	}
 
-	// Otherwise try HVCC (length-prefixed)
-	if n := detectLengthSize(buf); n > 0 {
-		nals, ranges, err := splitHVCC(buf, n)
-		if err != nil {
-			return err
-		}
-		for idx, nal := range nals {
-			typ := hevcNalType(nal)
-			r := ranges[idx]
-			prev := hex.EncodeToString(nal[:min(8, len(nal))])
-			fmt.Printf("#%d  type=%-2d  bytes=[%d..%d)  preview=%s\n", idx, typ, r[0], r[1], prev)
-		}
-		return nil
-	}
-
 	return fmt.Errorf("could not detect Annex-B or HVCC framing")
+}
+
+func IsKeyFrameNalu(naluType h265reader.NalUnitType) bool {
+	switch naluType {
+	case h265reader.NalUnitTypeVps, h265reader.NalUnitTypeSps, h265reader.NalUnitTypePps,
+		h265reader.NalUnitTypeIdrWRadl, h265reader.NalUnitTypeIdrNLp:
+		return true
+	default:
+		return false
+	}
 }

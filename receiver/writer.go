@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"myapp/transcoder"
 )
 
 type HEVCWriter struct {
@@ -199,35 +201,14 @@ func (d *HEVCWriter) cleanState() {
 	d.auHadAny = false
 }
 
-// isAnnexBKeyFrame checks if an Annex B formatted NALU contains a keyframe
+// isAnnexBKeyFrame checks if any NALU in the Annex B formatted data is a keyframe
 func isAnnexBKeyFrame(data []byte) bool {
-	// Find start code (0x000001 or 0x00000001)
-	offset := 0
-	if len(data) >= 4 && data[0] == 0 && data[1] == 0 && data[2] == 0 && data[3] == 1 {
-		offset = 4
-	} else if len(data) >= 3 && data[0] == 0 && data[1] == 0 && data[2] == 1 {
-		offset = 3
-	} else {
-		return false
+	nals, _ := transcoder.SplitAnnexB(data)
+	for _, nal := range nals {
+		naluType := transcoder.HevcNalType(nal)
+		if transcoder.IsKeyFrameNalu(naluType) {
+			return true
+		}
 	}
-
-	// Need at least 2 bytes for HEVC NAL header after start code
-	if len(data) < offset+2 {
-		return false
-	}
-
-	// Extract NAL unit type from first byte (bits 6-1)
-	naluType := (data[offset] & 0x7E) >> 1
-	return isKeyFrameNalu(naluType)
-}
-
-// isKeyFrameNalu checks if a NAL unit type represents a keyframe
-func isKeyFrameNalu(naluType byte) bool {
-	// VPS (32), SPS (33), PPS (34), IDR_W_RADL (19), IDR_N_LP (20)
-	switch naluType {
-	case 32, 33, 34, 19, 20:
-		return true
-	default:
-		return false
-	}
+	return false
 }

@@ -189,7 +189,6 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 		if err := dumper.PushNALU(depayloaded); err != nil {
 			panic(err)
 		}
-		fmt.Println("len is ", len(decodingChan))
 	}
 }
 
