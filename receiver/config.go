@@ -35,11 +35,13 @@ func (c *CCAType) UnmarshalJSON(b []byte) error {
 }
 
 type VideoReceiverConfig struct {
-	AnswerAddress string  `json:"answer_address"`
-	OfferAddress  string  `json:"offer_address"`
-	OutputDir     string  `json:"output_dir"`
-	FrameRate     uint32  `json:"frame_rate"`
-	CCA           CCAType `json:"cca"`
+	AnswerAddress     string  `json:"answer_address"`
+	OfferAddress      string  `json:"offer_address"`
+	OutputDir         string  `json:"output_dir"`
+	FrameRate         uint32  `json:"frame_rate"`
+	CCA               CCAType `json:"cca"`
+	ProcessedHEVCFile *string `json:"processed_hevc_file"`
+	RawHEVCFile       *string `json:"raw_hevc_file"`
 }
 
 func readReceiverConfigFile() (*VideoReceiverConfig, error) {

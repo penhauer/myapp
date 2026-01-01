@@ -125,10 +125,21 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 		panic(err)
 	}
 
+	var processedHEVCPath, rawHEVCPath, timecodesPath string
+	if config.ProcessedHEVCFile != nil && *config.ProcessedHEVCFile != "" {
+		processedHEVCPath = filepath.Join(config.OutputDir, *config.ProcessedHEVCFile)
+		// Automatically generate timecodes file alongside processed HEVC file
+		base := strings.TrimSuffix(*config.ProcessedHEVCFile, filepath.Ext(*config.ProcessedHEVCFile))
+		timecodesPath = filepath.Join(config.OutputDir, base+"_timecodes.txt")
+	}
+	if config.RawHEVCFile != nil && *config.RawHEVCFile != "" {
+		rawHEVCPath = filepath.Join(config.OutputDir, *config.RawHEVCFile)
+	}
+
 	dumper, err := NewHEVCWriter(
-		filepath.Join(config.OutputDir, "received.hevc"),
-		filepath.Join(config.OutputDir, "timecodes.txt"),
-		filepath.Join(config.OutputDir, "received_raw.hevc"),
+		processedHEVCPath,
+		timecodesPath,
+		rawHEVCPath,
 		tracker,
 	)
 	if err != nil {

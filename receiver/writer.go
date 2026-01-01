@@ -22,27 +22,42 @@ type HEVCWriter struct {
 	hasKeyFrame bool
 }
 
-func NewHEVCWriter(outH265Path, outTimecodesPath, rawH265Path string, tracker *RtpTracker) (*HEVCWriter, error) {
-	hf, err := os.Create(outH265Path)
-	if err != nil {
-		return nil, err
+func NewHEVCWriter(processedHEVCPath, timecodesPath, rawHEVCPath string, tracker *RtpTracker) (*HEVCWriter, error) {
+	var hf, tf, rf *os.File
+	var err error
+
+	if processedHEVCPath != "" {
+		hf, err = os.Create(processedHEVCPath)
+		if err != nil {
+			return nil, err
+		}
+		tf, err = os.Create(timecodesPath)
+		if err != nil {
+			if hf != nil {
+				_ = hf.Close()
+			}
+			return nil, err
+		}
+		if _, err := tf.WriteString("# timecode format v2\n"); err != nil {
+			if hf != nil {
+				_ = hf.Close()
+			}
+			_ = tf.Close()
+			return nil, err
+		}
 	}
-	tf, err := os.Create(outTimecodesPath)
-	if err != nil {
-		_ = hf.Close()
-		return nil, err
-	}
-	rf, err := os.Create(rawH265Path)
-	if err != nil {
-		_ = hf.Close()
-		_ = tf.Close()
-		return nil, err
-	}
-	if _, err := tf.WriteString("# timecode format v2\n"); err != nil {
-		_ = hf.Close()
-		_ = tf.Close()
-		_ = rf.Close()
-		return nil, err
+
+	if rawHEVCPath != "" {
+		rf, err = os.Create(rawHEVCPath)
+		if err != nil {
+			if hf != nil {
+				_ = hf.Close()
+			}
+			if tf != nil {
+				_ = tf.Close()
+			}
+			return nil, err
+		}
 	}
 
 	return &HEVCWriter{
@@ -57,24 +72,42 @@ func NewHEVCWriter(outH265Path, outTimecodesPath, rawH265Path string, tracker *R
 func (d *HEVCWriter) Close() error {
 	_ = d.Flush() // flush last AU
 
-	if err := d.timecodesFile.Close(); err != nil {
-		_ = d.hevcFile.Close()
-		_ = d.rawFile.Close()
-		return err
+	if d.timecodesFile != nil {
+		if err := d.timecodesFile.Close(); err != nil {
+			if d.hevcFile != nil {
+				_ = d.hevcFile.Close()
+			}
+			if d.rawFile != nil {
+				_ = d.rawFile.Close()
+			}
+			return err
+		}
 	}
-	if err := d.rawFile.Close(); err != nil {
-		_ = d.hevcFile.Close()
-		return err
+	if d.rawFile != nil {
+		if err := d.rawFile.Close(); err != nil {
+			if d.hevcFile != nil {
+				_ = d.hevcFile.Close()
+			}
+			return err
+		}
 	}
-	return d.hevcFile.Close()
+	if d.hevcFile != nil {
+		return d.hevcFile.Close()
+	}
+	return nil
 }
 
 // PushNALU feeds a depayloaded unit to both processed and raw files
 func (d *HEVCWriter) PushNALU(du *depayloadedUnit) error {
-	if err := d.PushToRawFile(du); err != nil {
-		return err
+	if d.rawFile != nil {
+		if err := d.PushToRawFile(du); err != nil {
+			return err
+		}
 	}
-	return d.PushToProcessedFile(du)
+	if d.hevcFile != nil {
+		return d.PushToProcessedFile(du)
+	}
+	return nil
 }
 
 // PushToRawFile writes raw NALU data directly to raw file (method B)
@@ -91,7 +124,6 @@ func (d *HEVCWriter) PushToProcessedFile(du *depayloadedUnit) error {
 	if len(nalu) == 0 {
 		return nil
 	}
-	fmt.Printf("Dumping rtpTs: %d marker: %v\n", rtpTS, marker)
 
 	// Check for keyframe if we haven't seen one yet (Annex B format)
 	if !d.hasKeyFrame {

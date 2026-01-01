@@ -3,5 +3,7 @@
     "answer_address": "127.0.0.1:60000",
     "output_dir": "/home/amirmo/testbed/video/ecn-pion/streaming/output",
     "frame_rate": 30,
-    "cca": "gcc"
+    "cca": "gcc",
+	"processed_hevc_file": "received.hevc",
+	"raw_hevc_file": "raw.hevc"
 }
