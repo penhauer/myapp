@@ -48,7 +48,7 @@ type sessionSetup struct {
 
 func setup_logger() logging.LeveledLogger {
 	loggerFactory := logging.NewDefaultLoggerFactory()
-	loggerFactory.DefaultLogLevel.Set(logging.LogLevelDebug)
+	loggerFactory.DefaultLogLevel.Set(logging.LogLevelInfo)
 	logger := loggerFactory.NewLogger("sender")
 	return logger
 }
@@ -205,7 +205,7 @@ func handle_video(ss *sessionSetup) {
 
 	go func() {
 		<-ss.iceConnectedCtx.Done()
-		stream_video(ss, videoTrack, ssrc)
+		stream_video(ss, videoTrack)
 	}()
 }
 
@@ -233,22 +233,21 @@ func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 		GoPSize:          30,
 		EncoderFrameRate: *ec.FrameRate, // whether we send the frames with this frame rate is not a business of the encoder
 		KeyFrameCallback: keyFrameCallback,
-		OutputPath:       filepath.Join(ss.config.OutputDir, "output.mp4"),
-		RawOutputPath:    filepath.Join(ss.config.OutputDir, "raw.x265"),
+		OutputPath:       filepath.Join(ss.config.OutputDir, "encoded.mp4"),
+		RawOutputPath:    filepath.Join(ss.config.OutputDir, "encoded.hevc"),
 	}
 
 	ss.fsCtx = &transcoder.FrameServingContext{}
 	ss.fsCtx.Init(ctx)
 }
 
-func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, ssrc uint32) {
+func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample) {
 	ec := ss.config.EncoderConfig
 	streamingDuration := *ss.config.Duration
 	tickDuration := time.Duration(float64(time.Second) / float64(*ec.FrameRate))
 	ticker := time.NewTicker(tickDuration)
 	defer ticker.Stop()
 
-	// start := time.Now()
 	var fcnt int
 	var done <-chan time.Time
 	var sizeSum int = 0
@@ -262,7 +261,6 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, s
 		case <-ticker.C:
 			fcnt++
 
-			// targetBitrate := ss.estimator(ssrc)
 			frame := ss.fsCtx.GetNextFrame()
 
 			sizeSum += len(frame.Data)
@@ -274,22 +272,15 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample, s
 
 				if val, ok := ss.es.(scream.BandwidthEstimator); ok {
 					// fmt.Printf("%+v\n", val.GetStats())
-					fmt.Printf("%v\n\n\n", val.GetStatsString())
+					ss.logger.Infof("%v\n\n\n", val.GetStatsString())
 				}
 			}
 
 			if len(frame.Data) == 0 {
 				continue
 			}
+			ss.logger.Debugf("frame: %d size: %d keyframe: %v\n", fcnt, len(frame.Data), frame.KeyFrame)
 
-			// elapsed := time.Since(start)
-			// ss.logger.Infof("elapsed=%v target bitrate=%d frame_bitrate= %d frame_size_bits=%d fcnt=%d \n",
-			// 	elapsed,
-			// 	targetBitrate,
-			// 	frame.Bitrate,
-			// 	len(frame.Data)*8,
-			// 	fcnt,
-			// )
 			if err := videoTrack.WriteSample(media.Sample{Data: frame.Data, Duration: tickDuration}); err != nil {
 				panic(err)
 			}
