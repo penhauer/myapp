@@ -71,6 +71,10 @@ func (t *RtpTracker) GetFrameNumber(ts uint32) uint32 {
 	return t.tsToFrame[ts]
 }
 
+func (t *RtpTracker) GetRealTime(ts uint32) float64 {
+	return float64(t.GetFrameNumber(ts)-1) * 1000 / float64(t.config.FrameRate)
+}
+
 func (t *RtpTracker) GetDiff(ts uint32) (uint32, time.Duration, time.Duration) {
 	now := time.Now()
 	T := 0 * time.Millisecond

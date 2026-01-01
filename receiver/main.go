@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/pion/interceptor"
@@ -124,8 +125,22 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 		panic(err)
 	}
 
+	dumper, err := NewHEVCWriter(
+		filepath.Join(config.OutputDir, "received.hevc"),
+		filepath.Join(config.OutputDir, "timecodes.txt"),
+		filepath.Join(config.OutputDir, "received_raw.hevc"),
+		tracker,
+	)
+	if err != nil {
+		panic(err)
+	}
+
 	decodingChan := make(chan *depayloadedUnit, 100)
-	defer close(decodingChan)
+
+	defer func() {
+		close(decodingChan)
+	}()
+
 	go decoderRoutine(dec, decodingChan)
 
 	for {
@@ -160,11 +175,15 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			continue
 		}
 		decodingChan <- depayloaded
+		if err := dumper.PushNALU(depayloaded); err != nil {
+			panic(err)
+		}
+		fmt.Println("len is ", len(decodingChan))
 	}
 }
 
 func decoderRoutine(dec *Decoder, decodingChan <-chan *depayloadedUnit) {
-	for depayloaded := range decodingChan {
-		dec.FeedUnit(depayloaded)
+	for d := range decodingChan {
+		dec.FeedUnit(d)
 	}
 }

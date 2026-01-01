@@ -194,10 +194,11 @@ func (ctx *Decoder) checkFlush() bool {
 }
 
 func (ctx *Decoder) doFlush(ts uint32) error {
+	frameNum, _, tsDiff := ctx.config.tracker.GetDiff(ts)
+
 	// fmt.Printf("\n\n\n\n\n printing nals for %d and %d\n", frameNum, ts)
 	// transcoder.PrintHEVCNALs(ctx.buff)
 
-	frameNum, _, tsDiff := ctx.config.tracker.GetDiff(ts)
 	logger.Infof("Starting to feed frame %v to decoder. tsDiff: %v\n", frameNum, tsDiff.Milliseconds())
 
 	in := ctx.buff
