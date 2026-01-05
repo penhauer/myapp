@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -243,6 +244,8 @@ func configure_transcoder(ss *sessionSetup, ssrc uint32) {
 		KeyFrameCallback: keyFrameCallback,
 		MP4OutputFile:    mp4OutputFile,
 		HEVCOutputFile:   hevcOutputFile,
+		// LogLevel:         slog.LevelDebug,
+		LogLevel: slog.LevelInfo,
 	}
 
 	ss.fsCtx = &transcoder.FrameServingContext{}

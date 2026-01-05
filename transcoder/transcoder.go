@@ -284,6 +284,7 @@ func setupEncoder(ctx *transcodingCtx) error {
 
 	// Copy parameters and align time bases
 	C.avcodec_parameters_from_context(ctx.encStream.CAVStream.codecpar, ctx.encCodec.CAVCodecContext)
+	ctx.encStream.CAVStream.time_base = ctx.encCodec.CAVCodecContext.time_base
 	ctx.encStream.TimeBase().SetDenominator(ctx.encCodec.TimeBase().Denominator())
 	ctx.encStream.TimeBase().SetNumerator(ctx.encCodec.TimeBase().Numerator())
 	ctx.encStream.SetAverageFrameRate(ctx.encCodec.FrameRate())
@@ -362,6 +363,7 @@ func decodeStream(ctx *transcodingCtx) bool {
 		}
 
 		if logger.Enabled(context.TODO(), slog.LevelDebug) {
+			// too time consuming!
 			printRawFrameHash(ctx, frame)
 		}
 
@@ -478,6 +480,10 @@ func encodeFrame(ctx *transcodingCtx, frame *Frame, done bool) {
 			"pts", pts,
 			"size", len(data),
 			"encoderFrame", ctx.frameCnt)
+
+		if logger.Enabled(context.TODO(), slog.LevelDebug) {
+			PrintHEVCNALs(data)
+		}
 
 		// An encoded frame (access unit) has been detected
 		ef := &EncoderFrame{
