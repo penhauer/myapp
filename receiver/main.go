@@ -136,7 +136,7 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 		rawHEVCPath = filepath.Join(config.OutputDir, *config.RawHEVCFile)
 	}
 
-	dumper, err := NewHEVCWriter(
+	writer, err := NewHEVCWriter(
 		processedHEVCPath,
 		timecodesPath,
 		rawHEVCPath,
@@ -147,21 +147,41 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	}
 
 	decodingChan := make(chan *depayloadedUnit, 100)
+	writingChan := make(chan *depayloadedUnit, 100)
 
 	defer func() {
 		close(decodingChan)
+		close(writingChan)
 	}()
 
 	go decoderRoutine(dec, decodingChan)
+	go writerRoutine(writer, writingChan)
 
+	var prevSeqNum *uint16
 	for {
 		p, a, err := track.ReadRTP()
 		if err != nil {
 			logger.Errorf("error reading RTP: %v\n", err)
 			return
 		}
+
+		// Assert RTP packets are received in increasing sequence number order (handle wraparound and drops)
+		if prevSeqNum != nil {
+			// Check if sequence number went backwards (accounting for wraparound at 2^16)
+			// Allow gaps (dropped packets) but not backwards movement
+			if p.SequenceNumber > *prevSeqNum {
+				// Normal case: sequence increased
+			} else if *prevSeqNum-p.SequenceNumber > 32768 {
+				// Wraparound case: prev was near 65535, curr is near 0
+			} else {
+				// Out of order: sequence decreased without wraparound
+				logger.Warnf("RTP packets received out of order: got seq=%d after seq=%d", p.SequenceNumber, *prevSeqNum)
+				continue
+			}
+		}
+		prevSeqNum = &p.SequenceNumber
+
 		tracker.OnRtp(p)
-		// fr.OnRtp(p)
 
 		var ecn rtcp.ECN
 		if e, hasECN := a["ECN"]; hasECN {
@@ -174,8 +194,8 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
 
 		if p.Marker {
-			frameNum, _, tsDiff := tracker.GetDiff(p.Timestamp)
-			logger.Infof("Last RTP Packet of frame %d was received at %v\n", frameNum, tsDiff.Milliseconds())
+			frameNum, frameDiff, tsDiff := tracker.GetDiff(p.Timestamp)
+			logger.Infof("Last RTP Packet of frame %d (SN: %d  TS: %d) was received at frameDiff: %v tsDiff: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, frameDiff.Milliseconds(), tsDiff.Milliseconds())
 		}
 
 		depayloaded, err := depayloader.WriteRTP(p)
@@ -185,15 +205,21 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			}
 			continue
 		}
+		writingChan <- depayloaded
 		decodingChan <- depayloaded
-		if err := dumper.PushNALU(depayloaded); err != nil {
-			panic(err)
-		}
 	}
 }
 
 func decoderRoutine(dec *Decoder, decodingChan <-chan *depayloadedUnit) {
 	for d := range decodingChan {
 		dec.FeedUnit(d)
+	}
+}
+
+func writerRoutine(writer *HEVCWriter, writingChan <-chan *depayloadedUnit) {
+	for d := range writingChan {
+		if err := writer.PushNALU(d); err != nil {
+			panic(err)
+		}
 	}
 }

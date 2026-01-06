@@ -54,7 +54,7 @@ func (h *H265Depayloader) WriteRTP(packet *rtp.Packet) (*depayloadedUnit, error)
 
 	// Check for sequence number gap (packet loss)
 	if h.hasLastSeqNumber {
-		expectedSeqNumber := h.lastSeqNumber + 1
+		expectedSeqNumber := h.lastSeqNumber + 1 // uint16 addition automatically wraps around
 		if seqNumber != expectedSeqNumber {
 			// Packet loss detected: reset depacketizer to drop any in-flight fragmented NALU
 			h.depacketizer = &codecs.H265Packet{}

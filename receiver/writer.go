@@ -174,6 +174,25 @@ func (d *HEVCWriter) resetAU(ts uint32) {
 }
 
 func (d *HEVCWriter) flushAU() error {
+	// Check for two AUD NALUs inside the current AU buffer
+
+	// transcoder.PrintHEVCNALs(d.auBuf)
+
+	audCount, firstAUD := d.AUDCount()
+	if audCount >= 2 {
+		panic(fmt.Sprintf("found >=2 AUD NALUs in AU buffer (ts=%d)", d.curTS))
+	}
+	if audCount != 1 {
+		fmt.Println("Skipping due to not finding any AUD in the buffer")
+		d.cleanState()
+		return nil
+	}
+	if !firstAUD {
+		fmt.Println("Skipping due to not having the first NALU is AUD")
+		d.cleanState()
+		return nil
+	}
+
 	if !d.auHadAny || len(d.auBuf) == 0 {
 		// nothing to write; just reset
 		d.cleanState()
@@ -211,4 +230,25 @@ func isAnnexBKeyFrame(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// AUDCount returns true if the provided AU buffer contains two or more
+// Access Unit Delimiter (AUD) NALUs. Called on every flushAU to detect
+// malformed or duplicated AUDs.
+func (d *HEVCWriter) AUDCount() (int, bool) {
+	if len(d.auBuf) == 0 {
+		return 0, false
+	}
+	nals, _ := transcoder.SplitAnnexB(d.auBuf)
+	firstAUD := false
+	cnt := 0
+	for i, nal := range nals {
+		if int(transcoder.HevcNalType(nal)) == 35 { // AUD nal unit type in HEVC
+			if i == 0 {
+				firstAUD = true
+			}
+			cnt++
+		}
+	}
+	return cnt, firstAUD
 }

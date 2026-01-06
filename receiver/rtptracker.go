@@ -43,8 +43,9 @@ func (t *RtpTracker) OnRtp(p *rtp.Packet) {
 		t.firstTime = time.Now()
 		t.firstTsSet = true
 		t.logger.Infof(
-			"Received first RTP at: %s ts: %v",
+			"Received first RTP at: %s seq: %v ts: %v",
 			t.firstTime.Format(time.StampMilli),
+			p.SequenceNumber,
 			p.Header.Timestamp,
 		)
 
@@ -84,9 +85,12 @@ func (t *RtpTracker) GetDiff(ts uint32) (uint32, time.Duration, time.Duration) {
 
 	relativePT := time.Duration(float64(frameNum-1) / float64(t.config.FrameRate) * float64(time.Second))
 	past := now.Sub(t.firstTime)
-	timeDiff := past - relativePT - T
+	frameDiff := past - relativePT - T
 
+	if ts < t.firstTs {
+		panic("firstTs > ts should not happen")
+	}
 	tsDiff := past - time.Duration((float64(ts)-float64(t.firstTs))/float64(90_000)*float64(time.Second)) - T
 
-	return frameNum, timeDiff, tsDiff
+	return frameNum, frameDiff, tsDiff
 }

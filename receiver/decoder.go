@@ -21,7 +21,6 @@ package main
 #include <libavfilter/buffersrc.h>
 #include <libavfilter/buffersink.h>
 
-
 #cgo pkg-config: libavcodec libavutil libavformat libavcodec libavfilter
 */
 import (
@@ -37,13 +36,6 @@ import (
 	"time"
 	"unsafe"
 )
-
-// type DecodedFrame struct {
-// 	frame *Frame
-// 	ts    uint32
-// }
-
-// type FrameDecodedCallback func(decFrame DecodedFrame)
 
 type DecoderConfig struct {
 	Codec string
@@ -126,12 +118,6 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 		panic(err)
 	}
 
-	// ctx.f, err = os.OpenFile("/tmp/video.yuv", os.O_WRONLY, 0600)
-	// if err != nil {
-	// 	fmt.Println("could not open the output file")
-	// 	panic(err)
-	// }
-
 	d.buff = make([]byte, 0, size)
 	d.lastFlush = time.Now()
 
@@ -194,12 +180,12 @@ func (ctx *Decoder) checkFlush() bool {
 }
 
 func (ctx *Decoder) doFlush(ts uint32) error {
-	frameNum, _, tsDiff := ctx.config.tracker.GetDiff(ts)
+	frameNum, frameDiff, tsDiff := ctx.config.tracker.GetDiff(ts)
 
 	// fmt.Printf("\n\n\n\n\n printing nals for %d and %d\n", frameNum, ts)
 	// transcoder.PrintHEVCNALs(ctx.buff)
 
-	logger.Infof("Starting to feed frame %v to decoder. tsDiff: %v\n", frameNum, tsDiff.Milliseconds())
+	logger.Infof("Starting to feed frame %v to decoder. frameDiff: %v tsDiff: %v\n", frameNum, frameDiff.Milliseconds(), tsDiff.Milliseconds())
 
 	in := ctx.buff
 	n := len(in)
@@ -210,7 +196,10 @@ func (ctx *Decoder) doFlush(ts uint32) error {
 
 	C.memcpy(ctx.inbuf, unsafe.Pointer(&in[0]), C.size_t(n))
 	start := ctx.inbuf
+	consumed := int64(0)
 
+	fff := 0
+	lastTs := -1
 	for n > 0 {
 		var out_data *C.uint8_t
 		var out_size C.int
@@ -219,7 +208,7 @@ func (ctx *Decoder) doFlush(ts uint32) error {
 			ctx.parser, ctx.codecContext.CAVCodecContext,
 			&out_data, &out_size,
 			(*C.uint8_t)(start), C.int(n),
-			C.AV_NOPTS_VALUE, C.AV_NOPTS_VALUE, 0,
+			C.int64_t(ts), C.int64_t(ts), C.int64_t(consumed),
 		)
 
 		if int(lenC) < 0 {
@@ -228,13 +217,37 @@ func (ctx *Decoder) doFlush(ts uint32) error {
 
 		start = unsafe.Add(start, lenC)
 		n -= int(lenC)
+		consumed += int64(lenC)
 
 		if int(out_size) > 0 {
+			fff += 1
 			ctx.packet.Unref()
 			C.av_new_packet(ctx.packet.CAVPacket, out_size)
 			C.memcpy(unsafe.Pointer(ctx.packet.CAVPacket.data), unsafe.Pointer(out_data), C.size_t(out_size))
-			ctx.packet.SetPTS(int64(ts))
-			ctx.packet.SetDTS(int64(ts))
+			parserPTS := int64(ctx.parser.pts)
+			parserDTS := int64(ctx.parser.dts)
+			switch {
+			case parserPTS != int64(C.AV_NOPTS_VALUE):
+				ctx.packet.SetPTS(parserPTS)
+				ctx.packet.SetDTS(parserPTS)
+			case parserDTS != int64(C.AV_NOPTS_VALUE):
+				ctx.packet.SetPTS(parserDTS)
+				ctx.packet.SetDTS(parserDTS)
+			default:
+				logger.Warnf("no parser timestamp available; falling back to flush ts=%d", ts)
+				continue
+			}
+
+			if fff >= 2 {
+				if lastTs == int(ctx.packet.CAVPacket.pts) {
+					panic(fmt.Sprintf("Got lastTs= %d equal to packet pts=%d\n", lastTs, int(ctx.packet.CAVPacket.pts)))
+				}
+			}
+			lastTs = int(ctx.packet.CAVPacket.pts)
+
+			// _ = outPos
+			// ctx.packet.SetPTS(int64(ts))
+			// ctx.packet.SetDTS(int64(ts))
 			for {
 				code := int(C.avcodec_send_packet(ctx.codecContext.CAVCodecContext, ctx.packet.CAVPacket))
 				if code == 0 {
@@ -247,14 +260,16 @@ func (ctx *Decoder) doFlush(ts uint32) error {
 				}
 
 				if code < 0 {
-					fmt.Printf("avcodec_send_packet failed with code %v", int(code))
+					logger.Errorf("avcodec_send_packet failed with code %v\n", int(code))
 					break
 				} else {
 					ctx.receiveFrame()
 				}
-
 			}
 		}
+	}
+	if fff == 0 {
+		logger.Warnf("Feeding frame %d produced no packet\n", frameNum)
 	}
 
 	ctx.lastFlush = time.Now()
@@ -262,48 +277,23 @@ func (ctx *Decoder) doFlush(ts uint32) error {
 	return nil
 }
 
-func (ctx *Decoder) writeFrameToFFPlay(f *C.AVFrame) {
-
-	w := int(ctx.frame.CAVFrame.width)
-	h := int(ctx.frame.CAVFrame.height)
-
-	ySize := w * h
-	uvSize := ySize / 4
-
-	// Y
-	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[0]), C.int(ySize)))
-	// U
-	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[1]), C.int(uvSize)))
-	// V
-	ctx.f.Write(C.GoBytes(unsafe.Pointer(f.data[2]), C.int(uvSize)))
-}
-
 func (ctx *Decoder) receiveFrame() {
 	for {
 		code := int(C.avcodec_receive_frame(ctx.codecContext.CAVCodecContext, ctx.frame.CAVFrame))
 		if code == 0 {
-			// ctx.writeFrameToFFPlay(ctx.frame.CAVFrame)
-			// decodedFrame := DecodedFrame{
-			// 	frame: ctx.frame,
-			// 	ts:    uint32(ctx.frame.CAVFrame.pts),
-			// }
-
 			ts := uint32(ctx.frame.CAVFrame.pts)
 			now := time.Now()
-			frameNum, timeDiff, tsDiff := ctx.config.tracker.GetDiff(ts)
-
-			fmt.Printf("frame format: %v\n", ctx.frame.CAVFrame.format)
+			frameNum, frameDiff, tsDiff := ctx.config.tracker.GetDiff(ts)
 
 			logger.Infof(
-				"Frame %d with ts %d received at %s frameTimeDiff: %v tsDiff: %v",
+				"Frame %d with ts %d received at %s frameDiff: %v tsDiff: %v",
 				frameNum,
 				ts,
 				now.Format(time.StampMilli),
-				timeDiff.Milliseconds(),
+				frameDiff.Milliseconds(),
 				tsDiff.Milliseconds(),
 			)
 
-			// ctx.config.callback(decodedFrame)
 			ctx.frame.Unref()
 			continue
 		}
