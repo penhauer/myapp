@@ -152,9 +152,19 @@ func registerInterceptors(s *sessionSetup) error {
 	case SCREAM:
 		s.mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeVideo)
 		s.mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeAudio)
+		maxDelay := 0.04
+		pacing := true
+		if s.config.Scream.MaxRtpQueueDelay != nil {
+			maxDelay = *s.config.Scream.MaxRtpQueueDelay
+		}
+		if s.config.Scream.Pacing != nil {
+			pacing = *s.config.Scream.Pacing
+		}
 		screamInterceptor, err := scream.NewSenderInterceptor(
 			scream.InitialBitrate(float64(*s.config.Scream.InitialBitrate)),
 			scream.IsL4S(s.config.Scream.IsL4S),
+			scream.Pacing(pacing),
+			scream.MaxRtpQueueDelay(maxDelay),
 		)
 		if err != nil {
 			return err
@@ -309,7 +319,7 @@ func readRTCP(rtpSender *webrtc.RTPSender) {
 		continue
 		if rtcpErr == nil {
 			// keep a visible log for received RTCP packets
-			fmt.Println("RTCP packet received")
+			// fmt.Println("RTCP packet received")
 
 			f := &rtcp.CCFeedbackReport{}
 			if err := f.Unmarshal(rtcpBuf[:n]); err != nil {

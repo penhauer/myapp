@@ -18,6 +18,8 @@
     },
     "scream": {
         "initial_bitrate": 2500000,
-        "isL4s": false
+        "isL4s": true,
+        "pacing": true,
+        "max_rtp_queue_delay": 0.020
     }
 }

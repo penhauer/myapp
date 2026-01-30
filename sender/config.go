@@ -62,8 +62,10 @@ type GCCConfig struct {
 }
 
 type ScreamConfig struct {
-	InitialBitrate *int `json:"initial_bitrate"`
-	IsL4S          bool `json:"isL4s"`
+	InitialBitrate   *int     `json:"initial_bitrate"`
+	IsL4S            bool     `json:"isL4s"`
+	Pacing           *bool    `json:"pacing"`
+	MaxRtpQueueDelay *float64 `json:"max_rtp_queue_delay"`
 }
 
 func readSenderConfigFile() (*VideoSenderConfig, error) {
