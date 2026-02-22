@@ -41,8 +41,8 @@ import (
 type KeyFrameCallbackType func() int
 
 var (
-	FRAME_BUFFER = 30
-	LOOKAHEAD    = 2
+	FRAME_BUFFER = 2
+	LOOKAHEAD    = 0
 	logger       = slog.Default()
 )
 
@@ -191,12 +191,17 @@ func setupEncoder(ctx *transcodingCtx) error {
 	// --- 2) Build options (NVENC-friendly; drop libvpx ones)
 	params := map[string]string{
 		// NVENC options
-		"preset":         "p5",  // p1..p7 (p5 good balance)
-		"tune":           "ull", // ultra-low-latency
-		"rc":             "cbr", // cbr|vbr|constqp
-		"zerolatency":    "1",
+		"preset":      "p5",  // p1..p7 (p5 good balance)
+		"tune":        "ull", // ultra-low-latency
+		"rc":          "cbr", // cbr|vbr|constqp
+		"zerolatency": "1",
+
 		"repeat_headers": "1",
 		"aud":            "1",
+
+		"bf":           "0",
+		"rc-lookahead": "0",
+		"delay":        "0",
 
 		// For 10-bit: use P010 and consider profile=1
 		// "profile":   "1",
