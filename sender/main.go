@@ -45,6 +45,7 @@ type sessionSetup struct {
 	es            any
 
 	fsCtx *transcoder.FrameServingContext
+	fd    *FrameDelay
 }
 
 func setup_logger() logging.LeveledLogger {
@@ -70,6 +71,7 @@ func main() {
 
 	ss.pendingCandidates = make([]*webrtc.ICECandidate, 0)
 	ss.iceConnectedCtx, ss.iceConnectedCtxCancel = context.WithCancel(context.Background())
+	ss.fd = NewFrameDelay(float64(*ss.config.EncoderConfig.FrameRate))
 	setupPeerConnection(ss)
 	defer func() {
 		if cErr := ss.peerConnection.Close(); cErr != nil {
@@ -281,12 +283,22 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample) {
 		done = time.After(time.Duration(streamingDuration) * time.Second)
 	}
 
+	// mark the reference start time for expected frame times
+	if ss.fd != nil {
+		ss.fd.Start()
+	}
+	fcnt = 0
+
 	for {
 		select {
 		case <-ticker.C:
 			fcnt++
 
 			frame := ss.fsCtx.GetNextFrame()
+
+			if ss.fd != nil {
+				ss.fd.Record(fcnt, time.Now(), frame.KeyFrame)
+			}
 
 			sizeSum += len(frame.Data)
 			if frame.KeyFrame {
@@ -310,7 +322,15 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample) {
 				panic(err)
 			}
 		case <-done:
-			ss.logger.Infof("treaming duration of %d seconds reached, exiting\n", streamingDuration)
+			ss.logger.Infof("Streaming duration of %d seconds reached, exiting\n", streamingDuration)
+			if ss.fd != nil {
+				out := filepath.Join(ss.config.OutputDir, "sender_frame_offsets.json")
+				if err := ss.fd.Save(out); err != nil {
+					ss.logger.Errorf("failed to save frame offsets: %v", err)
+				} else {
+					ss.logger.Infof("saved frame offsets to %s", out)
+				}
+			}
 			os.Exit(0)
 		}
 	}
