@@ -171,11 +171,15 @@ func registerInterceptors(s *sessionSetup) error {
 		}
 		screamInterceptor.OnNewPeerConnection(func(id string, estimator scream.BandwidthEstimator) { //nolint: revive
 			f := func(ssrc uint32) int {
-				bitrate, err := estimator.GetTargetBitrate(ssrc)
-				if err != nil {
-					panic(err)
+				for {
+					bitrate, err := estimator.GetTargetBitrate(ssrc)
+					if err != nil {
+						panic(err)
+					}
+					if bitrate != -1 {
+						return bitrate
+					}
 				}
-				return bitrate
 			}
 			s.estimatorChan <- f
 			s.esChan <- estimator
