@@ -158,6 +158,7 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	go writerRoutine(writer, writingChan)
 
 	var prevSeqNum *uint16
+	var prevTS *uint32
 	for {
 		p, a, err := track.ReadRTP()
 		if err != nil {
@@ -193,10 +194,17 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 		logger.Debugf("Received RTP Packet seq=%d ts=%v marker=%t ecn=%v\n",
 			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
 
+		if prevTS == nil || *prevTS != p.Timestamp {
+			frameNum, frameDiff, tsDiff := tracker.GetDiff(p.Timestamp)
+			logger.Infof("First RTP Packet of frame %d (SN: %d  TS: %d) was received at frameDiff: %v tsDiff: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, frameDiff.Milliseconds(), tsDiff.Milliseconds())
+		}
+
 		if p.Marker {
 			frameNum, frameDiff, tsDiff := tracker.GetDiff(p.Timestamp)
 			logger.Infof("Last RTP Packet of frame %d (SN: %d  TS: %d) was received at frameDiff: %v tsDiff: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, frameDiff.Milliseconds(), tsDiff.Milliseconds())
 		}
+
+		prevTS = &p.Timestamp
 
 		depayloaded, err := depayloader.WriteRTP(p)
 		if err != nil {

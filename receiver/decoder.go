@@ -32,7 +32,6 @@ import (
 	"fmt"
 	"log"
 	"myapp/transcoder"
-	"os"
 	"time"
 	"unsafe"
 )
@@ -58,10 +57,9 @@ type Decoder struct {
 	lastFlush     time.Time
 	flushInterval time.Duration
 	buff          []byte
+	inbuf         unsafe.Pointer
 
-	inbuf unsafe.Pointer
-
-	f *os.File
+	flushC chan struct{}
 }
 
 func NewDecoder(config *DecoderConfig) (*Decoder, error) {
@@ -78,24 +76,23 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 	}
 
 	if d.codecContext, err = NewContextWithCodec(codec); err != nil {
-		return nil, fmt.Errorf("NewContextWithCodec: %w", err)
-	}
-
-	if d.codecContext, err = NewContextWithCodec(codec); err != nil {
 		return nil, fmt.Errorf("failed to create codec context: %v", err)
 	}
 
 	options := NewDictionary()
 	defer options.Free()
+	d.codecContext.CAVCodecContext.pkt_timebase = C.AVRational{num: 3000, den: 90000}
+	d.codecContext.CAVCodecContext.flags |= C.AV_CODEC_FLAG_LOW_DELAY
+
+	// Trying to eliminate the HW decoder's latency
+	// options.Set("surfaces", "1")
+
 	if err = d.codecContext.OpenWithCodec(codec, options); err != nil {
 		log.Fatalf("Failed to open decoder: %v\n", err)
 		return nil, err
 	}
-	d.codecContext.CAVCodecContext.pkt_timebase = C.AVRational{num: 1, den: 90000}
-	d.codecContext.CAVCodecContext.flags |= C.AV_CODEC_FLAG_LOW_DELAY
 
 	d.parser = C.av_parser_init(C.AV_CODEC_ID_HEVC)
-
 	size := 10_000_000
 	extraSize := C.size_t(C.AVPROBE_PADDING_SIZE)
 
@@ -105,7 +102,6 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 
 	if d.inbuf == nil {
 		panic("failed to allocate memory for input buffer")
-		// return ErrAllocationError
 	}
 
 	d.packet, err = NewPacket()
@@ -124,8 +120,11 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 	d.units = list.New()
 
 	frameDuration := time.Duration(1000.0/float64(d.config.FrameRate)) * time.Millisecond
-	d.flushInterval = time.Duration(float64(frameDuration) * 1.5)
+	d.flushInterval = time.Duration(float64(frameDuration) * 1.2)
 	log.Printf("Decoder initialized with flush interval: %v (frameRate: %d fps)\n", d.flushInterval, d.config.FrameRate)
+
+	d.flushC = make(chan struct{})
+	go d.flushRoutine()
 
 	return d, nil
 }
@@ -133,24 +132,34 @@ func NewDecoder(config *DecoderConfig) (*Decoder, error) {
 func (ctx *Decoder) FeedUnit(d *depayloadedUnit) error {
 	if d.marker {
 		ctx.units.PushBack(d)
-		ctx.initiateFlush()
+		ctx.flushC <- struct{}{}
 		return nil
 	}
 
 	if ctx.units.Len() > 0 && ctx.units.Back().Value.(*depayloadedUnit).ts != d.ts {
-		ctx.initiateFlush()
+		ctx.flushC <- struct{}{}
 		ctx.units.PushBack(d)
-		return nil
-	}
-
-	if time.Since(ctx.lastFlush) > ctx.flushInterval {
-		ctx.units.PushBack(d)
-		ctx.initiateFlush()
 		return nil
 	}
 
 	ctx.units.PushBack(d)
 	return nil
+}
+
+func (ctx *Decoder) flushRoutine() {
+	ticker := time.NewTicker(ctx.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.flushC:
+			ctx.initiateFlush()
+		case <-ticker.C:
+			if time.Since(ctx.lastFlush) > ctx.flushInterval {
+				ctx.initiateFlush()
+			}
+		}
+	}
 }
 
 func (ctx *Decoder) initiateFlush() {
