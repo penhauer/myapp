@@ -124,7 +124,6 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 	if err != nil {
 		panic(err)
 	}
-
 	var processedHEVCPath, rawHEVCPath, timecodesPath string
 	if config.ProcessedHEVCFile != nil && *config.ProcessedHEVCFile != "" {
 		processedHEVCPath = filepath.Join(config.OutputDir, *config.ProcessedHEVCFile)
@@ -195,13 +194,13 @@ func saveToDisk(track *webrtc.TrackRemote, config *VideoReceiverConfig) {
 			p.SequenceNumber, p.Header.Timestamp, p.Header.Marker, ecn)
 
 		if prevTS == nil || *prevTS != p.Timestamp {
-			frameNum, frameDiff, tsDiff := tracker.GetDiff(p.Timestamp)
-			logger.Infof("First RTP Packet of frame %d (SN: %d  TS: %d) was received at frameDiff: %v tsDiff: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, frameDiff.Milliseconds(), tsDiff.Milliseconds())
+			frameNum, tsDiff, _ := tracker.GetDiff(p.Timestamp)
+			logger.Infof("First RTP Packet of frame %d (SN: %d  TS: %d) was received at diff: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, tsDiff.Milliseconds())
 		}
 
 		if p.Marker {
-			frameNum, frameDiff, tsDiff := tracker.GetDiff(p.Timestamp)
-			logger.Infof("Last RTP Packet of frame %d (SN: %d  TS: %d) was received at frameDiff: %v tsDiff: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, frameDiff.Milliseconds(), tsDiff.Milliseconds())
+			frameNum, tsDiff, fullyReceived := tracker.GetDiff(p.Timestamp)
+			logger.Infof("Last RTP Packet of frame %d (SN: %d  TS: %d) was received at diff: %v fullyReceived: %v\n", frameNum, p.Header.SequenceNumber, p.Header.Timestamp, tsDiff.Milliseconds(), fullyReceived)
 		}
 
 		prevTS = &p.Timestamp

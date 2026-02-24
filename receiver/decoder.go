@@ -189,12 +189,16 @@ func (ctx *Decoder) checkFlush() bool {
 }
 
 func (ctx *Decoder) doFlush(ts uint32) error {
-	frameNum, frameDiff, tsDiff := ctx.config.tracker.GetDiff(ts)
+	frameNum, tsDiff, fullyReceived := ctx.config.tracker.GetDiff(ts)
 
 	// fmt.Printf("\n\n\n\n\n printing nals for %d and %d\n", frameNum, ts)
 	// transcoder.PrintHEVCNALs(ctx.buff)
 
-	logger.Infof("Starting to feed frame %v to decoder. frameDiff: %v tsDiff: %v\n", frameNum, frameDiff.Milliseconds(), tsDiff.Milliseconds())
+	logger.Infof("Starting to feed frame %v to decoder. diff: %v fullyReceived: %v\n",
+		frameNum,
+		tsDiff.Milliseconds(),
+		fullyReceived,
+	)
 
 	in := ctx.buff
 	n := len(in)
@@ -292,15 +296,15 @@ func (ctx *Decoder) receiveFrame() {
 		if code == 0 {
 			ts := uint32(ctx.frame.CAVFrame.pts)
 			now := time.Now()
-			frameNum, frameDiff, tsDiff := ctx.config.tracker.GetDiff(ts)
+			frameNum, tsDiff, fullyReceived := ctx.config.tracker.GetDiff(ts)
 
 			logger.Infof(
-				"Frame %d with ts %d received at %s frameDiff: %v tsDiff: %v",
+				"Frame %d with ts %d received at %s diff: %v fullyReceived: %v\n",
 				frameNum,
 				ts,
 				now.Format(time.StampMilli),
-				frameDiff.Milliseconds(),
 				tsDiff.Milliseconds(),
+				fullyReceived,
 			)
 
 			ctx.frame.Unref()

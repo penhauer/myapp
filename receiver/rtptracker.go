@@ -10,29 +10,31 @@ import (
 )
 
 type RtpTracker struct {
-	mu sync.RWMutex
-
-	frameNum uint32
+	config *VideoReceiverConfig
+	mu     sync.RWMutex
+	logger logging.LeveledLogger
 
 	firstTime  time.Time
 	firstTsSet bool
 	firstTs    uint32
 	lastTs     uint32
+	frameNum   uint32
+	tsToFrame  map[uint32]uint32
 
-	tsToFrame map[uint32]uint32
-
-	logger logging.LeveledLogger
-
-	config    *VideoReceiverConfig
-	frameRate uint32
+	firstRtp map[uint32]rtp.Header
+	lastRtp  map[uint32]rtp.Header
+	rtpCount map[uint32]int
 }
 
 func NewRtpTracker(logger logging.LeveledLogger, config *VideoReceiverConfig) *RtpTracker {
 	t := &RtpTracker{
 		logger:    logger,
 		config:    config,
-		frameRate: config.FrameRate,
 		tsToFrame: make(map[uint32]uint32),
+
+		firstRtp: make(map[uint32]rtp.Header),
+		lastRtp:  make(map[uint32]rtp.Header),
+		rtpCount: make(map[uint32]int),
 	}
 	return t
 }
@@ -57,40 +59,66 @@ func (t *RtpTracker) OnRtp(p *rtp.Packet) {
 	if tsDiff < 0 {
 		tsDiff += 1 << 32
 	}
-	frameDiff := math.Round(float64(tsDiff) / 90000.0 * float64(t.frameRate))
+	frameDiff := math.Round(float64(tsDiff) / 90000.0 * float64(t.config.FrameRate))
+
 	t.frameNum += uint32(frameDiff)
-	t.lastTs = p.Header.Timestamp
 
 	t.mu.Lock()
-	t.tsToFrame[t.lastTs] = t.frameNum
+	t.tsToFrame[p.Header.Timestamp] = t.frameNum
+
+	if _, ok := t.firstRtp[t.frameNum]; !ok {
+		t.firstRtp[t.frameNum] = p.Header
+	}
+	t.lastRtp[t.frameNum] = p.Header
+	t.rtpCount[t.frameNum] += 1
+
+	t.lastTs = p.Header.Timestamp
 	t.mu.Unlock()
 }
 
-func (t *RtpTracker) GetFrameNumber(ts uint32) uint32 {
+func (t *RtpTracker) GetFrameInfo(ts uint32) (uint32, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return t.tsToFrame[ts]
+	fn := t.tsToFrame[ts]
+
+	if !t.lastRtp[fn].Marker {
+		return fn, false
+	}
+	if fn > 1 {
+		last, ok := t.lastRtp[fn-1]
+		if !ok {
+			return fn, false
+		}
+		if !last.Marker {
+			return fn, false
+		}
+	}
+
+	diff := int(t.lastRtp[fn].SequenceNumber) - int(t.lastRtp[fn-1].SequenceNumber)
+	if diff < 0 {
+		diff += 1 << 16
+	}
+	return fn, t.rtpCount[fn] == diff
 }
 
 func (t *RtpTracker) GetRealTime(ts uint32) float64 {
-	return float64(t.GetFrameNumber(ts)-1) * 1000 / float64(t.config.FrameRate)
+	fn, _ := t.GetFrameInfo(ts)
+	return float64(fn-1) * 1000 / float64(t.config.FrameRate)
 }
 
-func (t *RtpTracker) GetDiff(ts uint32) (uint32, time.Duration, time.Duration) {
+func (t *RtpTracker) GetDiff(ts uint32) (uint32, time.Duration, bool) {
 	now := time.Now()
 	T := 0 * time.Millisecond
-	t.mu.RLock()
-	frameNum := t.tsToFrame[ts]
-	t.mu.RUnlock()
+	fn, fullyReceived := t.GetFrameInfo(ts)
 
-	relativePT := time.Duration(float64(frameNum-1) / float64(t.config.FrameRate) * float64(time.Second))
 	past := now.Sub(t.firstTime)
-	frameDiff := past - relativePT - T
+	// relativePT := time.Duration(float64(fn-1) / float64(t.config.FrameRate) * float64(time.Second))
+	// frameDiff := past - relativePT - T
 
 	if ts < t.firstTs {
 		panic("firstTs > ts should not happen")
 	}
 	tsDiff := past - time.Duration((float64(ts)-float64(t.firstTs))/float64(90_000)*float64(time.Second)) - T
 
-	return frameNum, frameDiff, tsDiff
+	return fn, tsDiff, fullyReceived
 }
