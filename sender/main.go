@@ -154,20 +154,39 @@ func registerInterceptors(s *sessionSetup) error {
 	case SCREAM:
 		s.mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeVideo)
 		s.mediaEngine.RegisterFeedback(webrtc.RTCPFeedback{Type: webrtc.TypeRTCPFBACK, Parameter: "ccfb"}, webrtc.RTPCodecTypeAudio)
-		maxDelay := 0.04
-		pacing := true
-		if s.config.Scream.MaxRtpQueueDelay != nil {
-			maxDelay = *s.config.Scream.MaxRtpQueueDelay
+		screamConfig := s.config.Scream
+		senderOptions := []scream.SenderOption{
+			scream.InitialBitrate(float64(*screamConfig.InitialBitrate)),
+			scream.IsL4S(screamConfig.IsL4S),
 		}
-		if s.config.Scream.Pacing != nil {
-			pacing = *s.config.Scream.Pacing
+
+		appendBoolOption := func(value *bool, builder func(bool) scream.SenderOption) {
+			if value != nil {
+				senderOptions = append(senderOptions, builder(*value))
+			}
 		}
-		screamInterceptor, err := scream.NewSenderInterceptor(
-			scream.InitialBitrate(float64(*s.config.Scream.InitialBitrate)),
-			scream.IsL4S(s.config.Scream.IsL4S),
-			scream.Pacing(pacing),
-			scream.MaxRtpQueueDelay(maxDelay),
-		)
+		appendFloatOption := func(value *float64, builder func(float64) scream.SenderOption) {
+			if value != nil {
+				senderOptions = append(senderOptions, builder(*value))
+			}
+		}
+		appendIntOption := func(value *int, builder func(int) scream.SenderOption) {
+			if value != nil {
+				senderOptions = append(senderOptions, builder(*value))
+			}
+		}
+
+		appendBoolOption(screamConfig.Pacing, scream.Pacing)
+		appendFloatOption(screamConfig.MaxRtpQueueDelay, scream.MaxRtpQueueDelay)
+		appendBoolOption(screamConfig.DelayBasedCC, scream.DelayBasedCC)
+		appendFloatOption(screamConfig.PacketPacingHeadroom, scream.PacketPacingHeadroom)
+		appendFloatOption(screamConfig.AdaptivePaceHeadroom, scream.AdaptivePaceHeadroom)
+		appendFloatOption(screamConfig.BytesInFlightHeadroom, scream.BytesInFlightHeadroom)
+		appendFloatOption(screamConfig.MaxWindowHeadroom, scream.MaxWindowHeadroom)
+		appendBoolOption(screamConfig.RelaxedPacing, scream.RelaxedPacing)
+		appendIntOption(screamConfig.InitialCwnd, scream.InitialCwnd)
+
+		screamInterceptor, err := scream.NewSenderInterceptor(senderOptions...)
 		if err != nil {
 			return err
 		}

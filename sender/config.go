@@ -62,10 +62,17 @@ type GCCConfig struct {
 }
 
 type ScreamConfig struct {
-	InitialBitrate   *int     `json:"initial_bitrate"`
-	IsL4S            bool     `json:"isL4s"`
-	Pacing           *bool    `json:"pacing"`
-	MaxRtpQueueDelay *float64 `json:"max_rtp_queue_delay"`
+	InitialBitrate        *int     `json:"initial_bitrate"`
+	IsL4S                 bool     `json:"isL4s"`
+	Pacing                *bool    `json:"pacing"`
+	MaxRtpQueueDelay      *float64 `json:"max_rtp_queue_delay"`
+	DelayBasedCC          *bool    `json:"delay_based_cc"`
+	PacketPacingHeadroom  *float64 `json:"packet_pacing_headroom"`
+	AdaptivePaceHeadroom  *float64 `json:"adaptive_pace_headroom"`
+	BytesInFlightHeadroom *float64 `json:"bytes_in_flight_headroom"`
+	MaxWindowHeadroom     *float64 `json:"max_window_headroom"`
+	RelaxedPacing         *bool    `json:"relaxed_pacing"`
+	InitialCwnd           *int     `json:"initial_cwnd"`
 }
 
 func readSenderConfigFile() (*VideoSenderConfig, error) {

@@ -2,24 +2,31 @@
     "offer_address": "127.0.0.1:50000",
     "answer_address": "127.0.0.1:60000",
     "output_dir": "/home/amirmo/testbed/video/ecn-pion/streaming/output",
-    "video": "/home/amirmo/testbed/video/ecn-pion/video_generator/video_files/4.y4m",
+    "video": "/home/amirmo/testbed/video/ecn-pion/video_generator/videos/Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv",
     "duration": 30,
-    "cca": "gcc",
+    "cca": "scream",
     "encoder": {
         "frame_rate": 30,
-        "initial_bitrate": 2500000,
+        "initial_bitrate": 1000000,
         "adaptive_bitrate": true,
         "loop_video": false,
         "mp4_output_file": "encoded.mp4",
         "hevc_output_file": "encoded.hevc"
     },
     "gcc": {
-        "initial_bitrate": 2500000
+        "initial_bitrate": 1000000
     },
     "scream": {
-        "initial_bitrate": 2500000,
+        "initial_bitrate": 1000000,
         "isL4s": true,
         "pacing": true,
-        "max_rtp_queue_delay": 0.020
+        "max_rtp_queue_delay": 0.020,
+        "delay_based_cc": true,
+        "packet_pacing_headroom": 1.5,
+        "adaptive_pace_headroom": 1.5,
+        "bytes_in_flight_headroom": 2.0,
+        "max_window_headroom": 5.0,
+        "relaxed_pacing": false,
+        "initial_cwnd": 125000
     }
 }
