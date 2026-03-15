@@ -129,6 +129,7 @@ func registerInterceptors(s *sessionSetup) error {
 	if err := s.mediaEngine.RegisterDefaultCodecs(); err != nil {
 		return err
 	}
+	maxRate := 8000000
 
 	s.estimatorChan = make(chan bitrateEstimator, 1)
 	s.esChan = make(chan any, 1)
@@ -137,6 +138,7 @@ func registerInterceptors(s *sessionSetup) error {
 		ccInterceptor, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {
 			return gcc.NewSendSideBWE(
 				gcc.SendSideBWEInitialBitrate(*s.config.GCC.InitialBitrate),
+				gcc.SendSideBWEMaxBitrate(maxRate),
 			)
 		})
 		if err != nil {
@@ -158,6 +160,7 @@ func registerInterceptors(s *sessionSetup) error {
 		senderOptions := []scream.SenderOption{
 			scream.InitialBitrate(float64(*screamConfig.InitialBitrate)),
 			scream.IsL4S(screamConfig.IsL4S),
+			scream.MaxBitrate(float64(maxRate)),
 		}
 
 		appendBoolOption := func(value *bool, builder func(bool) scream.SenderOption) {
@@ -316,7 +319,7 @@ func stream_video(ss *sessionSetup, videoTrack *webrtc.TrackLocalStaticSample) {
 			frame := ss.fsCtx.GetNextFrame()
 
 			if ss.fd != nil {
-				ss.fd.Record(fcnt, time.Now(), frame.KeyFrame)
+				ss.fd.Record(fcnt, time.Now(), len(frame.Data), frame.KeyFrame)
 			}
 
 			sizeSum += len(frame.Data)

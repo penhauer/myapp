@@ -11,6 +11,7 @@ import (
 type FrameOffset struct {
 	Frame           int       `json:"frame"`
 	OffsetMs        float64   `json:"offset_ms"` // ready - should_be_ready in milliseconds
+	FrameSizeBytes  int       `json:"frame_size_bytes"`
 	KeyFrame        bool      `json:"keyframe"`
 	ReadyAt         time.Time `json:"ready_at"`
 	ShouldBeReadyAt time.Time `json:"should_be_ready_at"`
@@ -46,9 +47,9 @@ func (fd *FrameDelay) Start() {
 	fd.started = true
 }
 
-// Record logs a single frame's ready time and whether it's a keyframe.
+// Record logs a single frame's ready time, size, and whether it's a keyframe.
 // frameIndex is 1-based.
-func (fd *FrameDelay) Record(frameIndex int, readyTime time.Time, keyframe bool) {
+func (fd *FrameDelay) Record(frameIndex int, readyTime time.Time, frameSizeBytes int, keyframe bool) {
 	fd.mu.Lock()
 	defer fd.mu.Unlock()
 	if !fd.started {
@@ -63,6 +64,7 @@ func (fd *FrameDelay) Record(frameIndex int, readyTime time.Time, keyframe bool)
 	fd.entries = append(fd.entries, FrameOffset{
 		Frame:           frameIndex,
 		OffsetMs:        offsetMs,
+		FrameSizeBytes:  frameSizeBytes,
 		KeyFrame:        keyframe,
 		ReadyAt:         readyTime,
 		ShouldBeReadyAt: expected,
