@@ -20,7 +20,7 @@
         "initial_bitrate": 1000000,
         "isL4s": true,
         "pacing": true,
-        "max_rtp_queue_delay": 0.020,
+        "max_rtp_queue_delay": 0.060,
         "delay_based_cc": true,
         "packet_pacing_headroom": 1.5,
         "adaptive_pace_headroom": 1.5,
